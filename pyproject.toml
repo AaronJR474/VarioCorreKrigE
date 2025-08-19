@@ -1,0 +1,16 @@
+[build-system]
+requires = ["setuptools", "setuptools-scm"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "VarioCorreKrigE"
+authors = [
+    {name = "AaronJR474" },
+]
+description = "Package for Variogram, Correlation and Kriging Estimation"
+readme = "README.md"
+requires-python = ">=3.9"
+dynamic = ["version", "dependencies"]
+
+[tool.setuptools.dynamic]
+dependencies = {file = ["requirements.txt"]}
