@@ -23,7 +23,7 @@ Refer to [Theory](https://github.com/AaronJR474/VarioCorreKrigE/blob/main/theory
      ```
 ### Option B
   ```bash
-  pip install git+ https://github.com/AaronJR474/VarioCorreKrigE.git
+  pip install git+https://github.com/AaronJR474/VarioCorreKrigE.git
   ```
 
 ## Utilizing the package
