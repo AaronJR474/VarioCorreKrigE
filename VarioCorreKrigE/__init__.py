@@ -26,7 +26,7 @@ try:
     )
     # common spelling alias
     LatLonToPolar = LatLongToPolar
-    __all__ += ["LatLongToPolar", "LatLonToPolar", "theta_from_params", "sample_points_from_geotiff"]
+    __all__ += ["LatLongToPolar", "LatLonToPolar", "theta_from_params", "sample_points_from_geotiff", "compute_distance_weights"]
 except ImportError:
     pass
 
