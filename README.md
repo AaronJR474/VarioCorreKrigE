@@ -1,11 +1,13 @@
 ![Cover](https://github.com/AaronJR474/VarioCorreKrigE/blob/main/Examples/Data/output.png)
 # VarioCorreKrigE: Variogram, Correlation and Krigging Estimation
 
-This repository was created to perform the estimation of variogram and correlation models, which are essential for many engineering uses. In particular, variogram and correlation models form the backbone for Kriging, by which values can be estimated at unknown locations. Whilst there are several available packages (see References), whilst some are thorough and fairly robust, they are largely generic and not tailored to specific use cases without additional modifications. In this regard, this repository focuses mainly on engineering applications such as:
+This repository was created to perform the estimation of variogram and correlation models, which are essential for many engineering uses. In particular, variogram and correlation models form the backbone for Kriging, by which values can be estimated at unknown locations. There are several available packages (see References), whilst some are thorough and fairly robust, they are largely niche in most cases and not tailored to specific use cases without additional modifications. In this regard, this repository focuses mainly on engineering applications such as:
 
 1) Spatial Correlation Models (SCMs) for parameter and residual estimation (e.g., Vs30, $`\delta W`$)
 2) Kriging Estimates of values at unknown locations
 3) Sequential Gaussian Simulation (SGS) for statistically robust estimates at unknown locations
+
+Refer to [Theory](https://github.com/AaronJR474/VarioCorreKrigE/blob/main/theory.ipynb) for getting a quick overview of the process for estimating semivariance and correlation whereby models are developed. [Theory](https://github.com/AaronJR474/VarioCorreKrigE/blob/main/theory.ipynb) also provides an overview of the available kernels and some of the underlying assumptions required to conduct robust geostatistical analyses.
 
 ## Installation
 ### Option A
