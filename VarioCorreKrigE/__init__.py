@@ -23,6 +23,7 @@ try:
         LatLongToPolar,
         theta_from_params,          # unified helper that knows both families
         sample_points_from_geotiff,
+        compute_distance_weights,
     )
     # common spelling alias
     LatLonToPolar = LatLongToPolar
@@ -41,10 +42,21 @@ try:
         make_init_and_bounds as make_vario_init_and_bounds,
         theta_from_params as theta_from_params_vario,
         pack_params as pack_params_vario,
+        spherical as spherical_vario,
+        exponential as exponential_vario,
+        gaussian as gaussian_vario,
+        cubic as cubic_vario,
+        powered_exponential as powered_exponential_vario,
+        matern as matern_vario,
+        damped_cosine_angle as damped_cosine_angle_vario,
+        angular_dissimilarity as angular_dissimilarity_vario,
     )
     __all__ += [
         "variofit", "variofitmulti", "VARIOGRAM_MODELS",
         "make_vario_init_and_bounds", "theta_from_params_vario", "pack_params_vario",
+        "spherical_vario", "exponential_vario", "gaussian_vario", "cubic_vario",
+        "powered_exponential_vario", "matern_vario",
+        "damped_cosine_angle_vario", "angular_dissimilarity_vario"
     ]
 except ImportError:
     pass
@@ -60,10 +72,21 @@ try:
         make_init_and_bounds as make_corre_init_and_bounds,
         theta_from_params as theta_from_params_corre,
         pack_params as pack_params_corre,
+        spherical as spherical_corre,
+        exponential as exponential_corre,
+        gaussian as gaussian_corre,
+        cubic as cubic_corre,
+        powered_exponential as powered_exponential_corre,
+        matern as matern_corre,
+        damped_cosine_angle as damped_cosine_angle_corre,
+        angular_dissimilarity as angular_dissimilarity_corre,
     )
     __all__ += [
         "correfit", "correfitmulti", "CORRELATION_MODELS",
         "make_corre_init_and_bounds", "theta_from_params_corre", "pack_params_corre",
+        "spherical_corre", "exponential_corre", "gaussian_corre", "cubic_corre",
+        "powered_exponential_corre", "matern_corre",
+        "damped_cosine_angle_corre", "angular_dissimilarity_corre",
     ]
 except ImportError:
     pass
