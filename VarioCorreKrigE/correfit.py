@@ -589,10 +589,12 @@ def compute_distance_weights(h_lag, n_j, weight_type='inverse-linear weighting',
         w = n_j * (1.0 + h_lag / weight_params[0]) ** (-weight_params[1])
     elif weight_type == 'linear weighting':
         w = n_j * np.ones_like(h_lag, dtype=float)
+    elif weight_type == 'inverse-linear squared weighting':
+        w = n_j/h_lag**2
     elif weight_type is None or weight_type == 'ols':
         w =  np.ones_like(h_lag, dtype=float)
     else:
-        raise ValueError("Invalid weight_type: choose None/'ols', 'inverse-linear weighting', 'exponential weighting', 'powered weighting' or 'linear weighting'")
+        raise ValueError("Invalid weight_type: choose None/'ols', 'inverse-linear weighting', 'inverse-linear squared weighting', 'exponential weighting', 'powered weighting' or 'linear weighting'")
 
     return w
 
@@ -1161,7 +1163,9 @@ def correfitmulti(
     df_rho  = pd.DataFrame({"h_lag": full_h})
     param_keys = None
 
-    gb = df.groupby(index_col, sort=False)
+    df = df.copy()
+    df[index_col] = df[index_col].astype(str).str.strip()
+    gb = df.groupby(index_col, sort=False, observed=False)
 
     for gid, gdf in tqdm(gb, total=gb.ngroups, desc="Fitting groups"):
 
