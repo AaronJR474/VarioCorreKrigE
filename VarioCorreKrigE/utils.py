@@ -46,10 +46,11 @@ def compute_distance_weights(h_lag, n_j, weight_type='inverse-linear weighting',
         Pair counts per bin.
     weight_type : {'inverse-linear weighting','exponential weighting','powered weighting', 'linear weighting', None, 'ols'}
         If None/'ols', returns ones (plain OLS).
-        'inverse-linear weighting': w(h)=n_j * 1/(1+h/b)
-        'exponential weighting'   : w(h)=n_j * exp(-h/b)
-        'powered weighting'     : w(h)=n_j * (1+h/b)^(-alpha)
-        'linear weighting'      : w(h)=n_j * ones(h)
+        'inverse-linear weighting'            : w(h)=n_j * 1/(1+h/b)
+        'exponential weighting'               : w(h)=n_j * exp(-h/b)
+        'powered weighting'                   : w(h)=n_j * (1+h/b)^(-alpha)
+        'linear weighting'                    : w(h)=n_j * ones(h)
+        'inverse-linear-squared weighting'    : w(h)=n_j / h^2
     weight_params : list[float] | dict | None
         If list, expected [b, alpha]; if dict, keys {'b','alpha'}.
         For 'inverse-linear weighting' and 'exponential weighting', only 'b' is used.
@@ -76,10 +77,12 @@ def compute_distance_weights(h_lag, n_j, weight_type='inverse-linear weighting',
         w = n_j * (1.0 + h_lag / weight_params[0]) ** (-weight_params[1])
     elif weight_type == 'linear weighting':
         w = n_j * np.ones_like(h_lag, dtype=float)
+    elif weight_type == 'inverse-linear-squared weighting':
+        w = n_j / h_lag**2
     elif weight_type is None or weight_type == 'ols':
         w =  np.ones_like(h_lag, dtype=float)
     else:
-        raise ValueError("Invalid weight_type: choose None/'ols', 'inverse-linear weighting', 'exponential weighting', 'powered weighting' or 'linear weighting'")
+        raise ValueError("Invalid weight_type: choose None/'ols', 'inverse-linear weighting', 'exponential weighting', 'powered weighting', 'inverse-linear-squared weighting' or 'linear weighting'")
 
     return w
 # function for computing angles and distances from a reference points e.g., Xeq can be an earthquake
@@ -149,5 +152,6 @@ def sample_points_from_geotiff(file_path, target_latlon, band=1):
                 pass
 
             out[inside] = vals
+
 
     return out.reshape(-1, 1)
