@@ -111,20 +111,27 @@ def cross_matheron(dz1, dz2):
     """
     Classical (Matheron-style) experimental cross-semivariogram estimator.
 
-    For increments:
-        dz1 = z1_i - z1_j
-        dz2 = z2_i - z2_j
-
-    The cross-semivariogram estimate is:
         γ12(h) = 0.5 * mean( dz1 * dz2 )
 
-    Returns np.nan if empty.
+    Parameters
+    ----------
+    dz1, dz2 : 1D arrays of float
+        Paired increments for the two variables in a bin.
+
+    Returns
+    -------
+    gamma12 : float
+        Cross-semivariance estimate for this bin.
     """
-    dz1 = np.asarray(dz1, float)
-    dz2 = np.asarray(dz2, float)
-    if dz1.size == 0:
-        return np.nan
-    return 0.5 * np.mean(dz1 * dz2)
+    n = dz1.shape[0]
+    if n == 0:
+        return 0.0  # or np.nan, but we never call this with empty bins
+
+    s = 0.0
+    for k in range(n):
+        s += dz1[k] * dz2[k]
+
+    return 0.5 * (s / n)
 
 @njit
 def cressie_hawkins(x):
@@ -1305,6 +1312,7 @@ def variofitmulti(
         the raw `variofit` output for each group.
     """
 
+    font_size = 16
     results = {}
     summary_rows = []
 
@@ -1491,10 +1499,12 @@ def variofitmulti(
             ax.plot(xlag_fit, y_fit_g, '-k', lw=0.2, alpha=0.6)
 
         cb = fig.colorbar(sc, ax=ax, pad=0.02, fraction=0.04, aspect=40)
-        cb.set_label('Observations per bin, n')
-        ax.legend(loc='best', frameon=False)
-        ax.set_xlabel("lag distance")
-        ax.set_ylabel(r'Semivariance, $\gamma$ (%s)' % estimator_type)
+        cb.set_label('Observations per bin, n', fontsize = font_size)
+        cb.ax.tick_params(labelsize=font_size)
+        ax.legend(loc='best', frameon=False, fontsize = font_size)
+        ax.set_xlabel("lag distance", fontsize = font_size)
+        ax.set_ylabel(r'Semivariance, $\gamma$ (%s)' % estimator_type, fontsize = font_size)
+        ax.tick_params(axis='both', labelsize=font_size)
         ax.set_xlim(0, max_distance)
         ax.set_ylim(0, float(M['gamma'].max()))
         ax.grid(True, linestyle='--', alpha=0.3)
@@ -1620,7 +1630,9 @@ def crossvariofit(
     fix_nugget=True,
     fix_sill=False,
     allow_negative_sill=True,
-    plot=False
+    plot=False,
+    balltree_leaf_size=40,
+    max_neighbors=None,
 ):
     """
     Compute an experimental cross-semivariogram and fit a variogram model.
@@ -1643,6 +1655,10 @@ def crossvariofit(
         If True, relaxes the c0 bounds to allow negative cross-sill.
     plot : bool, default False
         If True, makes a two-panel plot (counts + cross-semivariogram fit).
+    balltree_leaf_size : int, default 40
+        Leaf size for BallTree (used for 'geographic', 'cartesian', 'euclidean').
+    max_neighbors : int or None, default None
+        If not None, limits the number of neighbours per point when using BallTree.
 
     Returns
     -------
@@ -1665,37 +1681,162 @@ def crossvariofit(
         raise ValueError("Invalid Model: must be one of %s" % list(VARIOGRAM_MODELS.keys()))
     semivariomodel_fn = VARIOGRAM_MODELS[model_type]
 
-    # storage
+    n = len(values1)
+    if n < 2:
+        raise ValueError("Need at least 2 points to compute a cross-variogram.")
+
+    # number of bins
     nmax = int(round(float(max_distance) / float(bin_size)))
-    h_lag = np.zeros((nmax, 1))
-    gamma = np.zeros((nmax, 1))
-    n_obs = np.zeros((nmax, 1))
+    if nmax <= 0:
+        raise ValueError("max_distance / bin_size must be > 0.")
 
-    # distances
-    _, distance_ratio = _compute_distance_and_ratio(coords, distance_type, bin_size)
+    dt = str(distance_type).lower().strip()
 
-    # experimental cross-semivariance per bin
-    for i in range(1, nmax + 1):
-        site1, site2 = np.where(distance_ratio == i)
-        if len(site1) > 0:
-            h_lag[i - 1, 0] = bin_size / 2 + (i - 1) * bin_size
-            n_obs[i - 1, 0] = len(site1)
+    # ------------------------------------------------------------------
+    # Case 1: ANGULAR -> keep existing dense logic via _compute_distance_and_ratio
+    # ------------------------------------------------------------------
+    if dt == "angular":
+        h_lag = np.zeros((nmax, 1))
+        gamma = np.zeros((nmax, 1))
+        n_obs = np.zeros((nmax, 1))
 
-            dz1 = values1[site1] - values1[site2]
-            dz2 = values2[site1] - values2[site2]
-            gamma[i - 1, 0] = cross_matheron(dz1, dz2)
+        _, distance_ratio = _compute_distance_and_ratio(coords, "angular", bin_size)
+
+        for i in range(1, nmax + 1):
+            site1, site2 = np.where(distance_ratio == i)
+            if len(site1) > 0:
+                h_lag[i - 1, 0] = bin_size / 2 + (i - 1) * bin_size
+                n_obs[i - 1, 0] = len(site1)
+
+                dz1 = values1[site1] - values1[site2]
+                dz2 = values2[site1] - values2[site2]
+                gamma[i - 1, 0] = cross_matheron(dz1, dz2)
+            else:
+                h_lag[i - 1, 0] = np.nan
+                n_obs[i - 1, 0] = np.nan
+                gamma[i - 1, 0] = np.nan
+
+        # drop empty bins
+        keep = ~np.isnan(gamma).any(axis=1)
+        h_lag = h_lag[keep]
+        n_obs = n_obs[keep]
+        gamma = gamma[keep]
+
+    # ------------------------------------------------------------------
+    # Case 2: geographic / cartesian / euclidean -> BallTree radius search
+    # ------------------------------------------------------------------
+    else:
+        # Build neighbour list with BallTree (same spirit as variofit)
+        EARTH_RAD = 6371.227  # km
+        d_list   = []
+        dz1_list = []
+        dz2_list = []
+
+        if dt == "geographic":
+            # coords[:,0] = lat (deg), coords[:,1] = lon (deg)
+            lat_deg = coords[:, 0]
+            lon_deg = coords[:, 1]
+            lat_rad = np.deg2rad(lat_deg)
+            lon_rad = np.deg2rad(lon_deg)
+            pts = np.column_stack([lat_rad, lon_rad])
+
+            tree = BallTree(pts, metric="haversine", leaf_size=balltree_leaf_size)
+            radius = (float(max_distance) + 0.5 * float(bin_size)) / EARTH_RAD  # radians
+
+            ind_list, dist_list = tree.query_radius(
+                pts, r=radius, return_distance=True, sort_results=True
+            )
+
+            for i in range(n):
+                inds = ind_list[i]
+                dists_rad = dist_list[i]
+                mask = inds > i  # j > i, no self-pairs
+                if not np.any(mask):
+                    continue
+
+                js = inds[mask]
+                d_ij = dists_rad[mask] * EARTH_RAD  # back to km
+
+                if max_neighbors is not None and max_neighbors > 0:
+                    js = js[:max_neighbors]
+                    d_ij = d_ij[:max_neighbors]
+
+                d_list.append(d_ij)
+                dz1_list.append(values1[i] - values1[js])
+                dz2_list.append(values2[i] - values2[js])
+
+        elif dt in ("cartesian", "euclidean"):
+            pts = coords
+            tree = BallTree(pts, metric="euclidean", leaf_size=balltree_leaf_size)
+            radius = float(max_distance) + 0.5 * float(bin_size)
+
+            ind_list, dist_list = tree.query_radius(
+                pts, r=radius, return_distance=True, sort_results=True
+            )
+
+            for i in range(n):
+                inds = ind_list[i]
+                dists = dist_list[i]
+                mask = inds > i
+                if not np.any(mask):
+                    continue
+
+                js = inds[mask]
+                d_ij = dists[mask]
+
+                if max_neighbors is not None and max_neighbors > 0:
+                    js = js[:max_neighbors]
+                    d_ij = d_ij[:max_neighbors]
+
+                d_list.append(d_ij)
+                dz1_list.append(values1[i] - values1[js])
+                dz2_list.append(values2[i] - values2[js])
+
         else:
-            h_lag[i - 1, 0] = np.nan
-            n_obs[i - 1, 0] = np.nan
-            gamma[i - 1, 0] = np.nan
+            raise ValueError(
+                "Invalid distance_type for crossvariofit: choose 'geographic', "
+                "'cartesian', 'euclidean', or 'angular'"
+            )
 
-    # drop empty bins
-    keep = ~np.isnan(gamma).any(axis=1)
-    h_lag = h_lag[keep]
-    n_obs = n_obs[keep]
-    gamma = gamma[keep]
+        if not d_list:
+            raise ValueError("No neighbour pairs found within the specified max_distance.")
 
-    # prep fit vectors
+        d   = np.concatenate(d_list)
+        dz1 = np.concatenate(dz1_list)
+        dz2 = np.concatenate(dz2_list)
+
+        # Binning
+        r_idx = np.rint(d / float(bin_size)).astype(int)
+        mask  = (r_idx >= 1) & (r_idx <= nmax)
+        if not np.any(mask):
+            raise ValueError("No pair distances fell into bins 1..nmax; check max_distance/bin_size.")
+
+        r_idx = r_idx[mask]
+        dz1   = dz1[mask]
+        dz2   = dz2[mask]
+
+        bin_idx = r_idx - 1  # 0..nmax-1
+
+        # Bin centres
+        h_centers = (bin_size / 2.0) + np.arange(nmax, dtype=float) * float(bin_size)
+        counts    = np.bincount(bin_idx, minlength=nmax).astype(float)
+
+        # Cross-semi: γ12(h) = 0.5 * mean(dz1 * dz2) per bin
+        cp    = 0.5 * dz1 * dz2
+        sumcp = np.bincount(bin_idx, weights=cp, minlength=nmax)
+
+        gamma_vec = np.full(nmax, np.nan, dtype=float)
+        nonzero   = counts > 0
+        gamma_vec[nonzero] = sumcp[nonzero] / counts[nonzero]
+
+        # keep only non-empty bins, shape (k,1) to match variofit
+        h_lag = h_centers[nonzero].reshape(-1, 1)
+        n_obs = counts[nonzero].reshape(-1, 1)
+        gamma = gamma_vec[nonzero].reshape(-1, 1)
+
+    # -------------------------------------------------
+    # From here on: identical to old crossvariofit path
+    # -------------------------------------------------
     h = h_lag.ravel()
     g = gamma.ravel()
     m = n_obs.ravel()
@@ -1805,9 +1946,17 @@ def multicrossvariofit(
     allow_negative_sill=True,
     plot_single=False,
     plot_matrix=False,
+    balltree_leaf_size=40,
+    max_neighbors=None,
 ):
     """
     Fit auto-variograms (diag) and cross-variograms (off-diag) for multiple variables.
+
+    This uses `variofit` for auto-variograms (diagonal) and `crossvariofit`
+    for cross-variograms (off-diagonal). For distance_type in
+    {'geographic','cartesian','euclidean'} both use a BallTree radius search
+    with arguments `balltree_leaf_size` and `max_neighbors` so that only
+    pairs within `max_distance` are considered.
     """
 
     # Ensure the estimator is always 'Matheron' for cross-variograms
@@ -1873,6 +2022,8 @@ def multicrossvariofit(
             fix_nugget=fix_nugget,
             fix_sill=fix_sill,
             plot=plot_single,
+            balltree_leaf_size=balltree_leaf_size,
+            max_neighbors=max_neighbors,
         )
 
         h_lag, n_obs, gamma, params, r2_wls, r2_ols = res
@@ -1918,6 +2069,8 @@ def multicrossvariofit(
                 fix_sill=fix_sill,
                 allow_negative_sill=allow_negative_sill,
                 plot=plot_single,
+                balltree_leaf_size=balltree_leaf_size,
+                max_neighbors=max_neighbors,
             )
 
             h_lag, n_obs, gamma, params, r2_wls, r2_ols = res
@@ -1969,24 +2122,26 @@ def multicrossvariofit(
 
     r2_mats = {"r2_wls": r2_wls_mat, "r2_ols": r2_ols_mat}
 
-    # --- Matrix plot
+    # --- Matrix plot: lower triangle only
     if plot_matrix:
         fn = VARIOGRAM_MODELS[model_type]
         xfit = np.linspace(0.0, float(max_distance), 600)
 
-        # Collect y-axis limits from all gamma values
+        # Collect y-axis limits from *lower triangle only* (i >= j)
         y_all = []
         for (vi, vj), res in results.items():
-            h_lag, n_obs, gamma, params, r2w, r2o = res
-            y_all.extend(gamma.ravel())
-        y_all = np.array(y_all)
+            i_idx = values_cols.index(vi)
+            j_idx = values_cols.index(vj)
+            if j_idx > i_idx:   # skip upper triangle
+                continue
+            _, _, gamma_ij, _, _, _ = res
+            y_all.extend(gamma_ij.ravel())
+
+        y_all = np.asarray(y_all, float)
         y_min, y_max = np.nanmin(y_all), np.nanmax(y_all)
+        y_min = min(0.0, y_min)
+        pad = 0.05 * (y_max - y_min)
 
-        # Apply a small negative padding, but ensure y_min doesn't go below 0
-        y_min = min(0, y_min)  # this will ensure the minimum starts at 0
-        pad = 0.05 * (y_max - y_min)  # small padding above and below
-
-        # Create figure and axes grid
         fig, axes = plt.subplots(
             p, p, figsize=(2.4 * p, 2.4 * p), dpi=200, sharex=False, sharey=True
         )
@@ -1997,33 +2152,33 @@ def multicrossvariofit(
         for i, vi in enumerate(values_cols):
             for j, vj in enumerate(values_cols):
                 ax = axes[i, j]
-                res = results.get((vi, vj), None)
 
-                if res is None:
-                    ax.axis("off")
+                # skip upper triangle
+                if j > i:
+                    ax.set_axis_off()
                     continue
 
-                h_lag, n_obs, gamma, params, r2w, r2o = res
-                h = h_lag.ravel()
-                g = gamma.ravel()
+                res = results.get((vi, vj), None)
+                if res is None:
+                    ax.set_axis_off()
+                    continue
 
-                theta = theta_from_params(params, model_type)
+                h_lag, n_obs, gamma_ij, params_ij, r2w, r2o = res
+                h = h_lag.ravel()
+                g = gamma_ij.ravel()
+
+                theta = theta_from_params(params_ij, model_type)
                 gfit = fn(xfit, *theta)
 
-                # Plot experimental points and fitted curve
                 ax.plot(h, g, 'o', ms=2.5, markeredgecolor='black')
                 ax.plot(xfit, gfit, '-k', lw=0.8)
 
-                # Titles
                 ax.set_title(f"{vi} × {vj}" if i != j else vi, fontsize=8)
 
-                # Apply consistent y-limits and x-limits
                 ax.set_ylim(y_min - pad, y_max + pad)
                 ax.set_xlim(0, max_distance)
-
                 ax.grid(True, linestyle='--', alpha=0.2)
 
-                # Minimal labels
                 if i == p - 1:
                     ax.set_xlabel("lag", fontsize=8)
                 else:
