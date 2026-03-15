@@ -66,3 +66,11 @@ _Future versions will be extended to include_:
 > Mirko Mälicke, Egil Möller, Helge David Schneider, & Sebastian Müller. (2021, May 28). mmaelicke/scikit-gstat: A scipy flavoured geostatistical variogram analysis toolbox (Version v0.6.0). Zenodo. http://doi.org/10.5281/zenodo.4835779
 
 > Müller, S., Schüler, L., Zech, A., and Heße, F.: GSTools v1.3: a toolbox for geostatistical modelling in Python, Geosci. Model Dev., 15, 3161–3182, https://doi.org/10.5194/gmd-15-3161-2022, 2022.
+
+## Disclaimer
+
+This project is provided “as is” without any warranties or guarantees of any kind. Use of this code is at your own risk. The authors and contributors are not liable for any damages, data loss, or issues arising from the use, modification, or distribution of this software.
+
+This repository may contain experimental, incomplete, or evolving features. Nothing here should be considered production‑ready unless explicitly stated.
+
+You are responsible for reviewing and complying with all relevant licenses, data‑use agreements, and third‑party dependencies referenced in this project.
