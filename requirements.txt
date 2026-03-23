@@ -6,3 +6,4 @@ tqdm>=4.66
 pyproj>=3.6
 rasterio>=1.3
 numba
+scikit-learn
