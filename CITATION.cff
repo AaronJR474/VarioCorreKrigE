@@ -3,7 +3,7 @@
 
 cff-version: 1.2.0
 title: >-
-  Variogram, Correlation and Krigging Estimation
+  Variogram, Correlation and Kriging Estimation
   (VarioCorreKrigE)
 message: >-
   If you use this software, please cite it using the
