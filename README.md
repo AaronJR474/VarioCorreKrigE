@@ -1,5 +1,5 @@
 ![Cover](https://github.com/AaronJR474/VarioCorreKrigE/blob/main/Examples/Data/output.png)
-# VarioCorreKrigE: Variogram, Correlation and Krigging Estimation
+# VarioCorreKrigE: Variogram, Correlation and Kriging Estimation
 
 This repository was created to perform the estimation of variogram and correlation models, which are essential for many engineering uses. In particular, variogram and correlation models form the backbone for Kriging, by which values can be estimated at unknown locations. There are several available packages (see References), whilst some are thorough and fairly robust, they are largely niche in most cases and not tailored to specific use cases without additional modifications. In this regard, this repository focuses mainly on engineering applications such as:
 
