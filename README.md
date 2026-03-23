@@ -61,6 +61,8 @@ _Future versions will be extended to include_:
 
 > Pyrcz, M.J., 2024, Applied Geostatistics in Python: a Hands-on Guide with GeostatsPy [e-book]. Zenodo. doi:10.5281/zenodo.15169133
 
+> Deutsch, J., 2015–2025, Geostatistics Lessons [online]. Available at: https://geostatisticslessons.com/.
+
 ### Other Python Geostatistical Packages
 
 > Mirko Mälicke, Egil Möller, Helge David Schneider, & Sebastian Müller. (2021, May 28). mmaelicke/scikit-gstat: A scipy flavoured geostatistical variogram analysis toolbox (Version v0.6.0). Zenodo. http://doi.org/10.5281/zenodo.4835779
