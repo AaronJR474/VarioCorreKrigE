@@ -1,0 +1,71 @@
+# This CITATION.cff file was generated with cffinit.
+# Visit https://bit.ly/cffinit to generate yours today!
+
+cff-version: 1.2.0
+title: >-
+  Variogram, Correlation and Krigging Estimation
+  (VarioCorreKrigE)
+message: >-
+  If you use this software, please cite it using the
+  metadata from this file.
+type: software
+authors:
+  - given-names: Aaron Jerome
+    family-names: Rampersad
+    email: aaron.rampersad@pg.canterbury.ac.nz
+    affiliation: University of Canterbury
+    orcid: 'https://orcid.org/0009-0009-6134-3828'
+identifiers:
+  - type: doi
+    value: 10.5281/zenodo.17070522
+repository-code: 'https://github.com/AaronJR474/VarioCorreKrigE'
+abstract: >-
+  VarioCorreKrigE is a Python-based geostatistical toolkit
+  developed for simple to advanced spatial analysis, with
+  particular emphasis on earthquake engineering and
+  natural‑hazard applications rather than full geophysical
+  forward modelling. The framework integrates experimental
+  variogram and correlogram estimation, parametric model
+  fitting, auto‑ and cross‑dependence analysis, grouped and
+  multivariate workflows, and kriging-based spatial
+  interpolation within a consistent and extensible
+  environment. While engineered primarily for analysing
+  spatially distributed variables such as ground‑motion
+  intensities, residuals, site-condition proxies, and other
+  engineering-relevant datasets, the package also
+  accommodates both distance‑based and angular dependence
+  structures.
+
+
+  Importantly, VarioCorreKrigE also supports traditional
+  geophysical spatial‑estimation techniques including
+  cokriging, collocated cokriging, and related multivariate
+  interpolation methods which can be used as exploratory
+  tools or as part of more formal dependence‑modelling
+  workflows. In addition, the framework incorporates
+  advanced statistical capabilities such as variogram and
+  correlogram bootstrapping for pseudo‑posterior parameter
+  estimation, as well as a full implementation of empirical
+  Bayesian kriging (EBK) for propagating parameter
+  uncertainty into spatial predictions. By combining robust
+  estimation procedures, flexible covariance and correlation
+  modelling, and practical visualisation tools,
+  VarioCorreKrigE provides a reproducible platform for
+  characterising spatial variability, quantifying
+  dependence, and supporting engineering decision‑making in
+  seismic and broader natural‑hazard contexts.
+keywords:
+  - geostatistics
+  - spatial statistics
+  - variogram modelling
+  - correlogram analysis
+  - empirical Bayesian kriging
+  - kriging
+  - cokriging
+  - collocated cokriging
+  - multi-variate spatial analysis
+  - cross-variograms
+  - cross-correlation modelling
+license: GPL-3.0
+version: 2.0.0
+date-released: '2026-03-24'
