@@ -1,7 +1,8 @@
 """
-This file contains the functions required for estimating the correlation coefficients for correleograms as well as
-options to fit desired models to the data.
+Tools for estimating empirical correlograms and fitting parametric
+correlation models, with optional bootstrap uncertainty quantification.
 """
+
 
 import numpy as np
 import pandas as pd
@@ -17,23 +18,27 @@ from scipy import stats
 # Geographical Distance Function
 def haversine_oq(lon1, lat1, lon2, lat2, radians=False, earth_rad=6371.227):
     """
-    Allows to calculate geographical distance
-    using the haversine formula.
+    Compute great-circle distance between two sets of longitude/latitude points.
 
-    :param lon1: longitude of the first set of locations
-    :type lon1: numpy.ndarray
-    :param lat1: latitude of the frist set of locations
-    :type lat1: numpy.ndarray
-    :param lon2: longitude of the second set of locations
-    :type lon2: numpy.float64
-    :param lat2: latitude of the second set of locations
-    :type lat2: numpy.float64
-    :keyword radians: states if locations are given in terms of radians
-    :type radians: bool
-    :keyword earth_rad: radius of the earth in km
-    :type earth_rad: float
-    :returns: geographical distance in km
-    :rtype: numpy.ndarray
+    Parameters
+    ----------
+    lon1, lat1 : array-like or float
+        Longitudes and latitudes for the first set of points.
+    lon2, lat2 : array-like or float
+        Longitudes and latitudes for the second set of points.
+    radians : bool, default False
+        If True, inputs are assumed to already be in radians.
+    earth_rad : float, default 6371.227
+        Earth radius in kilometres.
+
+    Returns
+    -------
+    distance : ndarray
+        Matrix of pairwise distances in kilometres with shape (n1, n2).
+
+    Notes
+    -----
+    This function is used internally when `distance_type='geographic'`.
     """
     if not radians:
         cfact = np.pi / 180.
@@ -89,7 +94,7 @@ def pearsonr_uncen(value1, value2):
     Returns
     -------
     rho : float
-        Uncentered correlation in [-1, 1]. If fewer than two finite pairs are
+        Uncentered correlation in [-1, 1]. If fewer than three finite pairs are
         available, or if either vector has zero L2 norm after filtering finite
         pairs, returns `np.nan`.
 
@@ -129,12 +134,9 @@ def pearsonr_cen(value1, value2):
     Returns
     -------
     rho : float
-        Centered Pearson correlation in [-1, 1]. If either input is constant
-        (zero variance) after filtering finite pairs, SciPy emits a warning and
-        returns `np.nan`.
-    pvalue : float, optional
-        If you propagate the SciPy return value, a two-sided p-value is also
-        available. If you only return the coefficient, document that here.
+        Centered Pearson correlation in [-1, 1]. Returns `np.nan` if fewer than
+        three values are provided or if the correlation is undefined.
+
 
     Notes
     -----
@@ -169,11 +171,8 @@ def spearmanr_bin(value1, value2):
     Returns
     -------
     rho : float
-        Spearman rank correlation in [-1, 1]. If fewer than two finite pairs
+        Spearman rank correlation in [-1, 1]. If fewer than three finite pairs
         remain after filtering, returns `np.nan`.
-    pvalue : float, optional
-        If you propagate the SciPy return value, a two-sided p-value is also
-        available. If you only return ρ, document that here.
 
     Notes
     -----
@@ -391,16 +390,16 @@ def powered_exponential(h, r, beta, alpha=1.0):
     R0 = np.exp(- (h / a)**beta)
     return _apply_alpha(h, R0, alpha)
 
-def matern(h, r, nu, alpha=1.0):
+def matern(h, r, s, alpha=1.0):
     """
     Correlation kernel: Matérn
 
     Definition
     ----------
     Uses the same parameterization as your earlier code: set a = r / 2 and
-    u = 2 * (h * sqrt(nu)) / a. The unscaled kernel is
-        R0(h) = (2 / Gamma(nu)) * ((h * sqrt(nu)) / a)^nu * K_nu( 2 * (h * sqrt(nu)) / a )
-    where K_nu is the modified Bessel function of the second kind.
+    u = 2 * (h * sqrt(s)) / a
+    R0(h) = (2 / Gamma(s)) * ((h * sqrt(s)) / a)^s * K_s( 2 * (h * sqrt(s)) / a )
+    where K_s is the modified Bessel function of the second kind.
     Returned correlation:
         rho(h) = 1                   if h == 0
                  alpha * R0(h)       if h  > 0
@@ -411,7 +410,7 @@ def matern(h, r, nu, alpha=1.0):
         Nonnegative lag distance(s).
     r : float
         Effective range; mapped to a = r / 2 (≈95% decorrelation under this scaling).
-    nu : float
+    s : float
         Smoothness parameter (ν > 0). Smaller ν → rougher field; large ν → approaches Gaussian.
     alpha : float, default 1.0
         0 <= alpha <= 1. Scales correlation for h > 0; rho(0) = 1 always.
@@ -427,17 +426,14 @@ def matern(h, r, nu, alpha=1.0):
     This parameterization is equivalent to the standard Matérn up to a rescaling of 'a'.
     """
 
-    a  = float(r) / 2.0
-    nu = float(nu)
-    h  = np.asarray(h, float)
+    a = float(r) / 2.0
+    s = float(s)
+    h = np.asarray(h, float)
 
-    # argument for modified Bessel K_nu
-    u = 2.0 * (h * np.sqrt(nu)) / a
+    u = 2.0 * (h * np.sqrt(s)) / a
     with np.errstate(divide='ignore', invalid='ignore'):
-        term = (2.0 / special.gamma(nu)) * ((h * np.sqrt(nu)) / a)**nu * special.kv(nu, u)
+        term = (2.0 / special.gamma(s)) * ((h * np.sqrt(s)) / a)**s * special.kv(s, u)
 
-    # set exactly to 1 at h=0
-    R0 = term
     if np.ndim(h) == 0:
         R0 = 1.0 if h == 0.0 else term
     else:
@@ -546,26 +542,26 @@ CORRELATION_MODELS = {
 }
 
 # Define Fitting Weights
-def compute_distance_weights(h_lag, n_j, weight_type='inverse-linear weighting', weight_params = None):
-
+def compute_distance_weights(h_lag, n_j, weight_type='inverse-linear weighting', weight_params=None):
     """
     Build per-bin weights for fitting.
 
     Parameters
     ----------
     h_lag : (k,) array_like of float
-        Bin centers (same order as the target vector).
+        Bin centres.
     n_j : (k,) array_like of float
         Pair counts per bin.
-    weight_type : {'inverse-linear weighting','exponential weighting','powered weighting', 'linear weighting', None, 'ols'}
-        If None/'ols', returns ones (plain OLS).
-        'inverse-linear weighting': w(h)=n_j * 1/(1+h/b)
-        'exponential weighting'   : w(h)=n_j * exp(-h/b)
-        'powered weighting'     : w(h)=n_j * (1+h/b)^(-alpha)
-        'linear weighting'      : w(h)=n_j * ones(h)
-    weight_params : list[float] | dict | None
-        If list, expected [b, alpha]; if dict, keys {'b','alpha'}.
-        For 'inverse-linear weighting' and 'exponential weighting', only 'b' is used.
+    weight_type : {'inverse-linear weighting', 'inverse-linear squared weighting',
+                   'exponential weighting', 'powered weighting',
+                   'linear weighting', None, 'ols'}
+        Weighting scheme.
+    weight_params : list[float] | tuple[float, ...] | None
+        Parameters used by the weighting scheme.
+        Expected order is [b, alpha]. For 'inverse-linear weighting' and
+        'exponential weighting', only b is used. When calling from higher-level
+        wrappers, dictionaries may be converted to this list form before being
+        passed here.
 
     Returns
     -------
@@ -575,42 +571,74 @@ def compute_distance_weights(h_lag, n_j, weight_type='inverse-linear weighting',
     Raises
     ------
     ValueError
-        If `weight_type` is unknown or required params missing.
+        If `weight_type` is unknown or required parameters are missing.
     """
-
     h_lag = np.asarray(h_lag, float)
     n_j = np.asarray(n_j, float)
 
+    b = None
+    alpha = None
+
+    if isinstance(weight_params, dict):
+        b = weight_params.get("b", None)
+        alpha = weight_params.get("alpha", None)
+    elif weight_params is not None:
+        wp = list(weight_params)
+        if len(wp) >= 1:
+            b = wp[0]
+        if len(wp) >= 2:
+            alpha = wp[1]
+
     if weight_type == 'inverse-linear weighting':
-        w = n_j * (1.0 / (1.0 + h_lag / weight_params[0]))
+        if b is None or b <= 0:
+            raise ValueError("inverse-linear weighting requires weight_params['b'] > 0")
+        w = n_j / (1.0 + h_lag / b)
+
     elif weight_type == 'exponential weighting':
-        w = n_j * np.exp(-h_lag / weight_params[0])
+        if b is None or b <= 0:
+            raise ValueError("exponential weighting requires weight_params['b'] > 0")
+        w = n_j * np.exp(-h_lag / b)
+
     elif weight_type == 'powered weighting':
-        w = n_j * (1.0 + h_lag / weight_params[0]) ** (-weight_params[1])
+        if b is None or b <= 0 or alpha is None:
+            raise ValueError("powered weighting requires weight_params with b > 0 and alpha")
+        w = n_j * (1.0 + h_lag / b) ** (-alpha)
+
     elif weight_type == 'linear weighting':
         w = n_j * np.ones_like(h_lag, dtype=float)
+
     elif weight_type == 'inverse-linear squared weighting':
-        w = n_j/h_lag**2
+        w = np.where(h_lag > 0.0, n_j / h_lag**2, 0.0)
+
     elif weight_type is None or weight_type == 'ols':
-        w =  np.ones_like(h_lag, dtype=float)
+        w = np.ones_like(h_lag, dtype=float)
+
     else:
-        raise ValueError("Invalid weight_type: choose None/'ols', 'inverse-linear weighting', 'inverse-linear squared weighting', 'exponential weighting', 'powered weighting' or 'linear weighting'")
+        raise ValueError(
+            "Invalid weight_type: choose None/'ols', 'inverse-linear weighting', "
+            "'inverse-linear squared weighting', 'exponential weighting', "
+            "'powered weighting' or 'linear weighting'"
+        )
 
     return w
 
 # Objective Function(s) for Fitting
 def objective_func(params, h, rho, weights, correlation_fn):
     """
-    Weighted SSE objective: minimize Σ w_i [y_i - model_fn(h_i; θ)]^2.
+    Weighted SSE objective: minimize Σ w_i [rho_i - correlation_fn(h_i; θ)]^2.
 
     Parameters
     ----------
     params : sequence of float
-        θ in the order expected by `model_fn`.
-    h, y, weights : (k,) arrays
-        Bin centers, target values (gamma or rho), and weights.
-    model_fn : callable
-        Signature `model_fn(h, *params)` → (k,) array.
+        Parameter vector in the order expected by `correlation_fn`.
+    h : (k,) array_like
+        Bin centres.
+    rho : (k,) array_like
+        Empirical correlation values at the bin centres.
+    weights : (k,) array_like
+        Per-bin fitting weights.
+    correlation_fn : callable
+        Signature `correlation_fn(h, *params)` -> (k,) array.
 
     Returns
     -------
@@ -621,40 +649,35 @@ def objective_func(params, h, rho, weights, correlation_fn):
     rho_pred = correlation_fn(h, *params)
     return np.sum(weights * (rho - rho_pred)**2)
 
-def _small_lag_alpha0(h, rho, k=3):
-    """
-    Robust initial alpha from the k smallest positive lags.
-    Falls back to max(rho) if needed; clipped to (0,1].
-    """
-    h = np.asarray(h, float).ravel()
-    r = np.asarray(rho, float).ravel()
-    mask = np.isfinite(h) & np.isfinite(r) & (h > 0)
-    if not np.any(mask):
-        a0 = np.nanmax(r) if np.any(np.isfinite(r)) else 1.0
-    else:
-        idx = np.argsort(h[mask])[:min(k, np.count_nonzero(mask))]
-        a0 = np.nanmedian(r[mask][idx])
-        if not np.isfinite(a0):
-            a0 = np.nanmax(r) if np.any(np.isfinite(r)) else 1.0
-    return float(np.clip(a0, 1e-3, 1.0))
-
 def make_init_and_bounds(model, h, rho, xmax_factor=2.0, fix_alpha=True):
-
     """
-    Initial guesses & bounds for *correlation* models.
+    Build initial values and parameter bounds for a correlation-model fit.
 
-    Parameter layouts
-    -----------------
-    spherical/exponential/gaussian/cubic : (r, alpha)
-    powered_exponential                  : (r, beta, alpha)
-    matern                               : (r, nu, alpha)
-    damped_cosine_angle                  : (c_deg, alpha)
+    Parameters
+    ----------
+    model : str
+        Name of the correlation kernel.
+    h : array-like of float
+        Lag-bin centres used in the fit.
+    rho : array-like of float
+        Empirical correlation values at the same lags.
+    xmax_factor : float, default 2.0
+        Upper multiplier used to cap range-like parameters relative to the
+        largest observed lag.
+    fix_alpha : bool, default True
+        If True, fix `alpha=1` and fit a model with no nugget jump. If False,
+        estimate `alpha` in `(0, 1)`.
+
+    Returns
+    -------
+    x0 : tuple
+        Initial parameter values in the order expected by the chosen kernel.
+    bounds : tuple
+        Bounds for the optimizer in the same order as `x0`.
 
     Notes
     -----
-    - alpha enforces ρ(0)=1 then scales ρ(h>0) by alpha∈(0,1] (nugget scaling).
-    - If `fix_alpha`, alpha is fixed at 1 using bounds (1,1).
-    - Range-like params capped at `xmax_factor * max(h)`.
+    `alpha` controls the drop from `rho(0)=1` to the positive-lag branch.
     """
 
     h = np.asarray(h, float).ravel()
@@ -713,7 +736,7 @@ def make_init_and_bounds(model, h, rho, xmax_factor=2.0, fix_alpha=True):
         h_max = float(np.nanmax(h[mask_pos])) if np.any(mask_pos) else 1.0
 
         # initial guess ~ half the max observed angle, but never < 1e-3
-        c0 = max(1e-3, 0.5 * h_max if np.isfinite(h_max) and h_max > 0 else 1.0)
+        c_init = max(1e-3, 0.5 * h_max if np.isfinite(h_max) and h_max > 0 else 1.0)
         # lower bound ~ half the smallest nonzero angle (keeps c > 0 and avoids overfitting tiny scales)
         c_lo = max(1e-3, 0.5 * h_min if np.isfinite(h_min) and h_min > 0 else 1e-3)
 
@@ -726,7 +749,7 @@ def make_init_and_bounds(model, h, rho, xmax_factor=2.0, fix_alpha=True):
             # no need to clamp at 180°; allow slow damping if needed
             c_hi = xmax_factor * h_max if np.isfinite(h_max) and h_max > 0 else None
 
-        x0 = (c0, alpha0)
+        x0 = (c_init, alpha0)
         bounds = ((c_lo, c_hi), alpha_bounds)
 
     else:
@@ -789,118 +812,591 @@ def r2_score_weighted(y, yhat, w=None):
         ss_tot = np.sum(w * (y - ybar)**2)
     return 1.0 - ss_res / ss_tot if ss_tot > 0 else np.nan
 
-def pack_params(model_type, theta):
+def _alpha_from_c0_b(c0, b):
+    c0 = float(c0)
+    b = float(b)
+    sigma2 = c0 + b
+    if sigma2 <= 0.0:
+        return 0.0
+    return c0 / sigma2
+
+
+def _c0_b_from_alpha(alpha, sigma2=1.0):
+    alpha = float(alpha)
+    sigma2 = float(sigma2)
+    c0 = alpha * sigma2
+    b = (1.0 - alpha) * sigma2
+    return c0, b, sigma2
+
+
+def pack_params(model_type, theta, sigma2=1.0):
     """
-    Correlation-model parameter packing.
+    Convert fitted kernel parameters into a public parameter dictionary.
 
-    Parameter layouts expected by CORRELATION_MODELS:
+    Parameters
+    ----------
+    model_type : str
+        Name of the fitted kernel.
+    theta : sequence of float
+        Parameter vector in the order expected by the kernel function.
+    sigma2 : float, default 1.0
+        Total variance used when mapping `alpha` to the variance-style summary
+        terms `c0` and `b`.
 
-      - spherical / exponential / gaussian / cubic : (r, alpha)
-      - powered_exponential                        : (r, beta, alpha)
-      - matern                                     : (r, s, alpha)     # s = smoothness (ν)
-      - damped_cosine_angle/angular dissimilarity  : (c, alpha)        # c = damping angle (degrees)
-
-    where
-      r     : range-like parameter (model-specific mapping to scale 'a')
-      beta  : shape exponent for powered exponential (0 < beta ≤ 2)
-      s     : Matérn smoothness ν (typically 1e-3 ≤ s ≤ 5)
-      c     : angular damping (degrees) for the damped-cosine model
-      alpha : correlation scale for h > 0 (0 ≤ alpha ≤ 1), with ρ(0) = 1
+    Returns
+    -------
+    params : dict
+        Dictionary containing the kernel shape parameters together with:
+        - `alpha`: positive-lag scaling
+        - `c0`: structured variance component
+        - `b`: nugget variance component
+        - `sigma2`: total variance
 
     Notes
     -----
-    The correlation kernels are implemented to satisfy ρ(0)=1.
-    The parameter alpha scales ρ(h) away from zero-lag, allowing a
-    reduction in correlation at infinitesimal lags analogous to a nugget
-    effect in variograms (i.e., α ≈ c0 / (b + c0) under unit variance).
+    Under the current parameterization, `alpha = c0 / (c0 + b)`.
     """
+
+    theta = [float(v) for v in theta]
+
     if model_type in ("spherical", "exponential", "gaussian", "cubic"):
         names = ("r", "alpha")
     elif model_type == "powered_exponential":
         names = ("r", "beta", "alpha")
     elif model_type == "matern":
-        names = ("r", "s", "alpha")  # 's' plays the role of nu
-    elif model_type in ("damped_cosine_angle","angular_dissimilarity"):
-        names = ("c", "alpha")       # c in degrees
+        names = ("r", "s", "alpha")
+    elif model_type in ("damped_cosine_angle", "angular_dissimilarity"):
+        names = ("c", "alpha")
     else:
         raise ValueError("Unknown model_type")
-    return {k: float(v) for k, v in zip(names, theta)}
+
+    params = {k: float(v) for k, v in zip(names, theta)}
+
+    alpha = float(params.get("alpha", 1.0))
+    c0, b, sigma2 = _c0_b_from_alpha(alpha, sigma2=sigma2)
+
+    params["c0"] = c0
+    params["b"] = b
+    params["sigma2"] = sigma2
+
+    return params
 
 def theta_from_params(params, model_type):
     """
-    Unpack in the same order expected by your CORRELATION_MODELS call signatures.
+    Unpack parameters in the callable order expected by CORRELATION_MODELS.
+
+    Accepts either:
+      - explicit alpha in params, or
+      - c0 and b, from which alpha is derived as c0 / (c0 + b).
     """
+    params = dict(params)
+
+    if "alpha" in params:
+        alpha = float(params["alpha"])
+    elif ("c0" in params) or ("b" in params):
+        c0 = float(params.get("c0", 0.0))
+        b = float(params.get("b", 0.0))
+        alpha = _alpha_from_c0_b(c0, b)
+    else:
+        alpha = 1.0
+
     if model_type in ("spherical", "exponential", "gaussian", "cubic"):
-        order = ("r", "alpha")
+        return [float(params["r"]), alpha]
     elif model_type == "powered_exponential":
-        order = ("r", "beta", "alpha")
+        return [float(params["r"]), float(params["beta"]), alpha]
     elif model_type == "matern":
-        order = ("r", "s", "alpha")
-    elif model_type in ("damped_cosine_angle","angular_dissimilarity"):
-        order = ("c", "alpha")
+        return [float(params["r"]), float(params["s"]), alpha]
+    elif model_type in ("damped_cosine_angle", "angular_dissimilarity"):
+        return [float(params["c"]), alpha]
     else:
         raise ValueError("Unknown model_type")
-    return [float(params[k]) for k in order]
 
-# Main function: correfit
-def correfit(values, coordinates, distance_type, max_distance, bin_size, correlation_type, model_type, weight_fn,
-             weight_params, max_lagfit_factor = 2, fix_alpha = True, plot = False):
-
+# Main helpers and fitting functions
+def _make_lag_axis(nmax, bin_size, lag_repr="center"):
     """
-    Compute an empirical correlogram and fit a parametric correlation model.
+    Construct the representative lag value for each equal-width bin.
 
     Parameters
     ----------
-    values : (n,) array_like of float
-        Sample values Z_i.
-    coordinates : (n,d) array_like of float
-        Sample locations. If distance_type=='geographic', columns are (lat_deg, lon_deg).
-    distance_type : {'geographic','euclidean','cartesian','angular'}
-        Distance metric for lag binning.
-    max_distance : float
-        Max separation (same units as chosen distance metric).
+    nmax : int
+        Number of bins.
     bin_size : float
-        Bin width (same units as max_distance).
-    correlation_type : {'pearsonr','uncentered pearsonr','spearman'}
-        Per-bin correlation estimator.
-    model_type : see CORRELATION_MODELS
-        Correlation kernel name.
-    weight_fn : {'ols','inverse-linear weighting','exponential weighting','powered_weighting', None}, optional
-        Bin-weight scheme (None/'ols' → equal weights).
-    weight_params : dict or list, optional
-        Params for `weight_fn`. If dict, keys {'b','alpha'}; if list, [b, alpha].
-    max_lagfit_factor : float, default 2.0
-        Upper cap for range-like parameters (r or c).
-    fix_alpha : bool, default True
-        If True, fixes alpha=1 (ρ(0)=1 and no nugget scaling).
-    plot : bool, default False
-        If True, render 2-panel plot (pair counts; empirical vs model ρ(h)).
+        Bin width.
+    lag_repr : {"center", "edge", "upper"}, default "center"
+        Representative lag attached to each bin:
+        - "center": midpoint of [k*bin_size, (k+1)*bin_size)
+        - "edge" / "upper": upper edge of [k*bin_size, (k+1)*bin_size)
 
     Returns
     -------
-    h_lag : (k,1) ndarray of float
-    n_obs : (k,1) ndarray of float
-    rho   : (k,1) ndarray of float
-    params : dict[str,float]
-        Fitted parameters in the order documented by `pack_params`.
-    r2_wls : float
-        Weighted R² using the same weights used in fitting.
-    r2_ols : float
-        Ordinary R² using ones as weights used in fitting.
+    h_full : ndarray, shape (nmax,)
+        Representative lag values for bins 0..nmax-1.
     """
+    lag_repr = str(lag_repr).lower().strip()
 
-    # ensure arrays
+    if lag_repr == "center":
+        return (bin_size / 2.0) + np.arange(nmax, dtype=float) * float(bin_size)
+    elif lag_repr in ("edge", "upper"):
+        return np.arange(1, nmax + 1, dtype=float) * float(bin_size)
+    else:
+        raise ValueError("lag_repr must be one of {'center', 'edge', 'upper'}.")
+
+def _safe_bin_correlation(correlation_fn, x, y, min_pairs=3):
+    """
+    Safe bin-level correlation with finite filtering and constant checks.
+    Returns np.nan if the correlation is undefined.
+    """
+    x = np.asarray(x, float)
+    y = np.asarray(y, float)
+
+    keep = np.isfinite(x) & np.isfinite(y)
+    x = x[keep]
+    y = y[keep]
+
+    if x.size < min_pairs:
+        return np.nan
+
+    if np.all(x == x[0]) or np.all(y == y[0]):
+        return np.nan
+
+    try:
+        val = correlation_fn(x, y)
+    except Exception:
+        return np.nan
+
+    return float(val) if np.isfinite(val) else np.nan
+
+def _prepare_crosscorrelation_geometry(coordinates, distance_type, bin_size, max_distance, lag_repr="center"):
+    """
+    Precompute pair geometry and lag-bin assignments for a fixed coordinate set.
+
+    Pair membership is defined by interval binning:
+        bin k contains distances in [k*bin_size, (k+1)*bin_size),
+    with the final bin capped at `max_distance`.
+
+    This depends only on the coordinates and distance settings, so it can be
+    reused across many cross-correlation fits on the same sites.
+
+    Parameters
+    ----------
+    coordinates : array_like
+        Site coordinates.
+    distance_type : {'geographic', 'cartesian', 'angular', 'euclidean'}
+        Distance metric used to form lag bins.
+    bin_size : float
+        Bin width.
+    max_distance : float
+        Maximum retained lag distance.
+    lag_repr : {"center", "edge", "upper"}, default "center"
+        Representative lag attached to each equal-width bin.
+
+    Returns
+    -------
+    pair_geometry : dict
+        Dictionary containing directional pair indices, interval-bin indices,
+        and the representative lag axis.
+    """
+    coords = np.asarray(coordinates, float)
+    n = len(coords)
+
+    if n < 2:
+        raise ValueError("Need at least 2 points to compute a cross-correlogram.")
+
+    dt = str(distance_type).lower()
+
+    if dt == "geographic":
+        lat = coords[:, 0]
+        lon = coords[:, 1]
+        distance = np.asarray(
+            haversine_oq(lon, lat, lon, lat, radians=False, earth_rad=6371.227),
+            dtype=float
+        )
+
+    elif dt == "cartesian":
+        if coords.shape[1] != 2:
+            raise ValueError("cartesian requires coordinates shape (n,2): (x, y)")
+        dx = coords[:, None, 0] - coords[None, :, 0]
+        dy = coords[:, None, 1] - coords[None, :, 1]
+        distance = np.hypot(dx, dy)
+
+    elif dt == "euclidean":
+        diff = coords[:, None, :] - coords[None, :, :]
+        distance = np.linalg.norm(diff, axis=-1)
+
+    elif dt == "angular":
+        theta_deg = np.asarray(coords, float)
+        if theta_deg.ndim == 2:
+            if theta_deg.shape[1] != 1:
+                raise ValueError("angular distance requires a single angular coordinate per row.")
+        theta = np.radians(theta_deg.ravel())
+        cos_diff = np.cos(theta[:, None] - theta[None, :])
+        ang_rad = np.arccos(np.clip(cos_diff, -1.0, 1.0))
+        distance = np.degrees(ang_rad)
+
+    else:
+        raise ValueError(
+            "Invalid distance_type: choose 'geographic', 'cartesian', 'angular', or 'euclidean'"
+        )
+
+    nmax = int(np.ceil(float(max_distance) / float(bin_size)))
+    if nmax <= 0:
+        raise ValueError("max_distance / bin_size must be > 0.")
+
+    i_idx, j_idx = np.where(~np.eye(n, dtype=bool))
+    d = distance[i_idx, j_idx]
+
+    keep = np.isfinite(d) & (d >= 0.0) & (d <= float(max_distance))
+    i_idx = i_idx[keep]
+    j_idx = j_idx[keep]
+    d = d[keep]
+
+    bin_idx = np.floor(d / float(bin_size)).astype(int)
+    bin_idx = np.minimum(bin_idx, nmax - 1)
+
+    h_full = _make_lag_axis(nmax, bin_size, lag_repr=lag_repr)
+
+    return {
+        "i_idx": i_idx,
+        "j_idx": j_idx,
+        "bin_idx": bin_idx,
+        "h_full": h_full,
+    }
+
+def _binned_correlogram_from_precomputed_pairs(values1, values2, pair_geometry, correlation_fn):
+    """
+    Build a binned correlogram using precomputed pair geometry.
+    """
+    values1 = np.asarray(values1, float)
+    values2 = np.asarray(values2, float)
+
+    i_idx = pair_geometry["i_idx"]
+    j_idx = pair_geometry["j_idx"]
+    bin_idx = pair_geometry["bin_idx"]
+    h_full = pair_geometry["h_full"]
+
+    x = values1[i_idx]
+    y = values2[j_idx]
+
+    finite_pair = np.isfinite(x) & np.isfinite(y)
+    counts = np.bincount(bin_idx[finite_pair], minlength=h_full.size).astype(float)
+
+    rho_full = np.full(h_full.size, np.nan, dtype=float)
+
+    for k in range(h_full.size):
+        if counts[k] == 0:
+            continue
+        mask_k = (bin_idx == k)
+        rho_full[k] = _safe_bin_correlation(
+            correlation_fn, x[mask_k], y[mask_k], min_pairs=3
+        )
+
+    keep = np.isfinite(rho_full)
+
+    return (
+        h_full.reshape(-1, 1),          # all bins
+        counts.reshape(-1, 1),          # all counts
+        rho_full.reshape(-1, 1),        # all rho
+        h_full[keep].reshape(-1, 1),    # valid h
+        counts[keep].reshape(-1, 1),    # valid counts
+        rho_full[keep].reshape(-1, 1),  # valid rho
+    )
+
+def _build_correlation_pair_arrays(values, coordinates, distance_type):
+    """
+    Build directional correlation pair arrays:
+        d = pair distances
+        x = values at site i
+        y = values at site j
+
+    Uses all off-diagonal directional pairs (i,j), i != j, to preserve the
+    behaviour of the original correfit implementation.
+    """
     values = np.asarray(values, float)
-    coords  = np.asarray(coordinates, float)
+    coords = np.asarray(coordinates, float)
     n = len(values)
 
-    # Define arrays for storage
-    nmax = round(max_distance/bin_size)
-    h_lag = np.zeros((nmax,1))
-    rho = np.zeros((nmax,1))
-    n_obs = np.zeros((nmax,1))
+    if n < 2:
+        raise ValueError("Need at least 2 points to compute a correlogram.")
 
-    # pick correlation estimator
+    dt = str(distance_type).lower()
+
+    if dt == "geographic":
+        lat = coords[:, 0]
+        lon = coords[:, 1]
+        distance = np.asarray(
+            haversine_oq(lon, lat, lon, lat, radians=False, earth_rad=6371.227),
+            dtype=float
+        )
+
+    elif dt == "cartesian":
+        if coords.shape[1] != 2:
+            raise ValueError("cartesian requires coordinates shape (n,2): (x, y)")
+        dx = coords[:, None, 0] - coords[None, :, 0]
+        dy = coords[:, None, 1] - coords[None, :, 1]
+        distance = np.hypot(dx, dy)
+
+    elif dt == "euclidean":
+        diff = coords[:, None, :] - coords[None, :, :]
+        distance = np.linalg.norm(diff, axis=-1)
+
+    elif dt == "angular":
+        theta_deg = np.asarray(coords, float)
+        if theta_deg.ndim == 2:
+            if theta_deg.shape[1] != 1:
+                raise ValueError("angular distance requires a single angular coordinate per row.")
+        theta = np.radians(theta_deg.ravel())
+        cos_diff = np.cos(theta[:, None] - theta[None, :])
+        ang_rad = np.arccos(np.clip(cos_diff, -1.0, 1.0))
+        distance = np.degrees(ang_rad)
+
+    else:
+        raise ValueError(
+            "Invalid distance_type: choose 'geographic', 'cartesian', "
+            "'angular', or 'euclidean'"
+        )
+
+    i_idx, j_idx = np.where(~np.eye(n, dtype=bool))
+
+    d = distance[i_idx, j_idx]
+    x = values[i_idx]
+    y = values[j_idx]
+
+    return d, x, y
+
+def _binned_correlogram_from_pairs(d, x, y, bin_size, max_distance, correlation_fn, lag_repr="center"):
+    """
+    Build full-bin and valid-bin correlogram arrays from pair lists.
+
+    Pair membership is defined by interval binning:
+        bin k contains distances in [k*bin_size, (k+1)*bin_size),
+    with the final bin capped at `max_distance`.
+    """
+    nmax = int(np.ceil(float(max_distance) / float(bin_size)))
+    if nmax <= 0:
+        raise ValueError("max_distance / bin_size must be > 0.")
+
+    d = np.asarray(d, dtype=float).ravel()
+    x = np.asarray(x, dtype=float).ravel()
+    y = np.asarray(y, dtype=float).ravel()
+
+    if not (d.shape == x.shape == y.shape):
+        raise ValueError("d, x, and y must have the same shape.")
+
+    mask = np.isfinite(d) & (d >= 0.0) & (d <= float(max_distance))
+    if not np.any(mask):
+        raise ValueError("No pair distances fell into [0, max_distance]; check max_distance/bin_size.")
+
+    d_use = d[mask]
+    x_use = x[mask]
+    y_use = y[mask]
+
+    bin_idx = np.floor(d_use / float(bin_size)).astype(int)
+    bin_idx = np.minimum(bin_idx, nmax - 1)
+
+    h_full = _make_lag_axis(nmax, bin_size, lag_repr=lag_repr)
+
+    finite_pair = np.isfinite(x_use) & np.isfinite(y_use)
+    counts = np.bincount(bin_idx[finite_pair], minlength=nmax).astype(float)
+
+    rho_full = np.full(nmax, np.nan, dtype=float)
+
+    for k in range(nmax):
+        if counts[k] == 0:
+            continue
+        mask_k = (bin_idx == k)
+        rho_full[k] = _safe_bin_correlation(
+            correlation_fn, x_use[mask_k], y_use[mask_k], min_pairs=3
+        )
+
+    keep = np.isfinite(rho_full)
+
+    return (
+        h_full.reshape(-1, 1),
+        counts.reshape(-1, 1),
+        rho_full.reshape(-1, 1),
+        h_full[keep].reshape(-1, 1),
+        counts[keep].reshape(-1, 1),
+        rho_full[keep].reshape(-1, 1),
+    )
+
+
+def _bootstrap_summary(arr, qlo=2.5, qhi=97.5):
+    arr = np.asarray(arr, float)
+    if arr.ndim == 1:
+        arr = arr[None, :]
+
+    valid_rows = np.any(np.isfinite(arr), axis=1)
+    if not np.any(valid_rows):
+        out = np.full(arr.shape[1], np.nan, dtype=float)
+        return out, out.copy(), out.copy(), 0
+
+    arrv = arr[valid_rows]
+    return (
+        np.nanmean(arrv, axis=0),
+        np.nanpercentile(arrv, qlo, axis=0),
+        np.nanpercentile(arrv, qhi, axis=0),
+        int(arrv.shape[0]),
+    )
+
+def _get_alpha_from_params(params):
+    """
+    Return alpha for the current correlation-model parameterization.
+
+    Priority:
+      1) use params['alpha'] if present
+      2) else derive alpha = c0 / (c0 + b) from params['c0'], params['b']
+      3) else return 1.0
+    """
+    params = {} if params is None else dict(params)
+
+    if "alpha" in params and params["alpha"] is not None:
+        alpha0 = float(params["alpha"])
+        if np.isfinite(alpha0):
+            return alpha0
+
+    if ("c0" in params) or ("b" in params):
+        c0 = float(params.get("c0", 0.0))
+        b = float(params.get("b", 0.0))
+        sigma2 = c0 + b
+        if sigma2 > 0.0:
+            return c0 / sigma2
+
+    return 1.0
+
+
+def _plot_correlation_model_piecewise(ax, x, y, params, color="k", lw=2.0, ls="-",
+                                      label=None, zorder=4, alpha_plot=1.0,
+                                      show_zero_point=True, jump_ls=":"):
+    """
+    Plot a correlation model with explicit nugget discontinuity.
+
+    For correlation models with nugget:
+        rho(0)  = 1
+        rho(0+) = alpha = c0 / (c0 + b)
+
+    The positive-lag branch is plotted for x > 0 only, and a vertical jump
+    is drawn at x = 0 when alpha < 1.
+    """
+    x = np.asarray(x, float)
+    y = np.asarray(y, float)
+
+    alpha0 = _get_alpha_from_params(params)
+    has_nugget = np.isfinite(alpha0) and (not np.isclose(alpha0, 1.0, atol=1e-8, rtol=0.0))
+
+    pos = x > 0
+
+    if has_nugget:
+        ax.plot(
+            x[pos], y[pos],
+            color=color, lw=lw, ls=ls, label=label,
+            zorder=zorder, alpha=alpha_plot
+        )
+
+        ax.plot(
+            [0.0, 0.0], [alpha0, 1.0],
+            color=color, lw=max(1.0, lw * 0.8), ls=jump_ls,
+            zorder=zorder, alpha=alpha_plot
+        )
+
+        if show_zero_point:
+            ax.plot(
+                0.0, 1.0, "o",
+                ms=4, mfc="white", mec=color,
+                zorder=zorder + 0.1, alpha=alpha_plot
+            )
+    else:
+        ax.plot(
+            x, y,
+            color=color, lw=lw, ls=ls, label=label,
+            zorder=zorder, alpha=alpha_plot
+        )
+
+def correfit(values, coordinates, distance_type, max_distance, bin_size,
+             correlation_type, model_type, weight_fn=None, weight_params=None,
+             max_lagfit_factor=2, fix_alpha=True, plot=False,
+             bootstrap=None, bootstrap_method="pair",
+             bootstrap_ci=(2.5, 97.5), random_state=None, lag_repr="center"):
+    """
+    Estimate an empirical correlogram and fit a parametric correlation model.
+
+    Parameters
+    ----------
+    values : array-like of float
+        Values observed at the sample locations.
+    coordinates : array-like
+        Coordinates of the sample locations.
+    distance_type : {'geographic', 'euclidean', 'cartesian', 'angular'}
+        Distance metric used to form lag bins.
+    max_distance : float
+        Maximum lag distance included in the empirical correlogram.
+    bin_size : float
+        Width of each lag bin.
+    lag_repr : {'center', 'edge', 'upper'}, default 'center'
+        Representative lag attached to each equal-width bin:
+        - 'center': midpoint of [k*bin_size, (k+1)*bin_size)
+        - 'edge'/'upper': upper edge of [k*bin_size, (k+1)*bin_size)
+
+        This affects the x-values used for plotting, weighting, and fitting, but
+        does not change which pairs fall into each bin.
+    correlation_type : {'pearsonr', 'uncentered pearsonr', 'spearman'}
+        Correlation estimator used within each lag bin.
+    model_type : str
+        Name of the correlation kernel to fit.
+    weight_fn : str or None
+        Weighting scheme used in the weighted least-squares fit.
+    weight_params : dict, list, or None
+        Parameters used by the chosen weighting scheme.
+    max_lagfit_factor : float, default 2
+        Upper cap for range-like model parameters during fitting.
+    fix_alpha : bool, default True
+        If True, fix `alpha=1` and fit a model without a nugget jump. If False,
+        estimate `alpha`.
+    plot : bool, default False
+        If True, plot the empirical correlogram and the fitted model.
+    bootstrap : int or None, default None
+        Number of bootstrap replicates. If None, no bootstrap is run.
+    bootstrap_method : {'pair', 'point'}, default 'pair'
+        Resampling scheme used for the bootstrap.
+    bootstrap_ci : tuple(float, float), default (2.5, 97.5)
+        Percentile interval used for the bootstrap confidence band.
+    random_state : int or None, default None
+        Seed for the random number generator used in the bootstrap.
+
+    Returns
+    -------
+    h_lag : ndarray
+        Representative lag values of the retained bins, according to `lag_repr`.
+    n_obs : ndarray
+        Number of directional pairs in each retained bin.
+    rho : ndarray
+        Empirical correlation in each retained bin.
+    params : dict
+        Fitted model parameters. Bootstrap results are added here when requested.
+    r2_wls : float
+        Weighted R² from the fitted model.
+    r2_ols : float
+        Ordinary R² from the fitted model.
+
+    Notes
+    -----
+    The fitted model always satisfies `rho(0)=1`. When `alpha < 1`, the model
+    includes a nugget-style jump between zero lag and the positive-lag branch.
+
+    For `distance_type='angular'`, the supplied angular coordinates are assumed to be in degrees.
+    """
+
+    values = np.asarray(values, float)
+    coords = np.asarray(coordinates, float)
+    n = len(values)
+
+    if n < 2:
+        raise ValueError("Need at least 2 points to compute a correlogram.")
+
+    nmax = int(np.ceil(float(max_distance) / float(bin_size)))
+    if nmax <= 0:
+        raise ValueError("max_distance / bin_size must be > 0.")
+
+    # correlation estimator
     if correlation_type == "uncentered pearsonr":
         correlation_fn = pearsonr_uncen
     elif correlation_type == "pearsonr":
@@ -908,9 +1404,11 @@ def correfit(values, coordinates, distance_type, max_distance, bin_size, correla
     elif correlation_type == "spearman":
         correlation_fn = spearmanr_bin
     else:
-        raise ValueError("Invalid estimator: choose from 'uncentered pearsonr', 'pearsonr', or 'spearman'")
+        raise ValueError(
+            "Invalid estimator: choose from 'uncentered pearsonr', 'pearsonr', or 'spearman'"
+        )
 
-    # pick correlation model
+    # correlation model
     if model_type == "exponential":
         correlationmodel_fn = exponential
     elif model_type == "cubic":
@@ -928,60 +1426,29 @@ def correfit(values, coordinates, distance_type, max_distance, bin_size, correla
     elif model_type == "angular_dissimilarity":
         correlationmodel_fn = angular_dissimilarity
     else:
-        raise ValueError("Invalid Model: Choose from 'exponential', 'cubic', 'powered_exponential', 'matern', "
-                         "'spherical', 'gaussian', 'damped_cosine_angle' or 'angular_dissimilarity'")
+        raise ValueError(
+            "Invalid Model: Choose from 'exponential', 'cubic', 'powered_exponential', "
+            "'matern', 'spherical', 'gaussian', 'damped_cosine_angle' or "
+            "'angular_dissimilarity'"
+        )
 
-    # compute pairwise distances
-    if distance_type == 'geographic':
-        lat = coords[:, 0]
-        lon = coords[:, 1]
-        distance = np.asarray(haversine_oq(lon, lat, lon, lat, radians=False, earth_rad=6371.227), dtype=float)
-        distance_ratio = np.rint(distance / bin_size)
+    # -------------------------------------------------
+    # main pair list and empirical correlogram
+    # -------------------------------------------------
+    d, x, y = _build_correlation_pair_arrays(values, coords, distance_type)
 
-    elif distance_type == 'cartesian':
-        # coords: (n,2) = (x,y) in same units as bin_size
-        if coords.shape[1] != 2:
-            raise ValueError("cartesian requires coordinates shape (n,2): (x, y)")
-        dx = coords[:, None, 0] - coords[None, :, 0]
-        dy = coords[:, None, 1] - coords[None, :, 1]
-        distance = np.hypot(dx, dy)
-        distance_ratio = np.rint(distance / bin_size)
+    h_full, n_full, rho_full, h_lag, n_obs, rho = _binned_correlogram_from_pairs(
+        d, x, y, bin_size, max_distance, correlation_fn, lag_repr=lag_repr
+    )
 
-    elif distance_type == 'euclidean':
-        diff = coords[:, None, :] - coords[None, :, :]
-        distance = np.linalg.norm(diff, axis=-1)
-        distance_ratio = np.rint(distance / bin_size)
-
-    elif distance_type == 'angular':
-        theta = np.asarray(coords, float).ravel()
-        # Cosine of angular differences
-        cos_diff = np.cos(theta[:, None] - theta[None, :])
-        ang_rad = np.arccos(np.clip(cos_diff, -1.0, 1.0))
-        distance = np.degrees(ang_rad)
-        distance_ratio = np.rint(distance / bin_size)
-
-    else:
-        raise ValueError("Invalid distance_type: choose 'geographic', 'cartesian', 'angular', or 'euclidean'")
-
-    # compute Correlation Coefficient
-    for i in range(1,nmax+1):
-        [site1, site2] = np.where(distance_ratio == i)
-        if len(site1) > 0:
-            h_lag[i-1,0]=bin_size/2+(i-1)*bin_size
-            n_obs[i-1,0]= len(site1)
-            rho[i-1, 0] = correlation_fn(values[site1], values[site2])
-        else:
-            h_lag[i-1,0]=np.nan
-            n_obs[i-1,0]=np.nan
-            rho[i-1,0]=np.nan
-
-    # drop empty bins/nan estimates in semivariance
-    keep = ~np.isnan(rho).any(axis=1)
-    h_lag = h_lag[keep]
-    n_obs = n_obs[keep]
-    rho = rho[keep]
-
-    # fit model
+    if h_lag.size == 0:
+        raise ValueError(
+            "No valid lag bins with a defined empirical correlation were found. "
+            "Check the data, bin_size, max_distance, and minimum usable pairs per bin."
+        )
+    # -------------------------------------------------
+    # main fit
+    # -------------------------------------------------
     h = h_lag.ravel()
     g = rho.ravel()
     m = n_obs.ravel()
@@ -989,171 +1456,418 @@ def correfit(values, coordinates, distance_type, max_distance, bin_size, correla
     if weight_fn is None or str(weight_fn).lower() == "ols":
         weights = np.ones_like(h, dtype=float)
     else:
-        if isinstance(weight_params, dict):
+        if weight_params is None:
+            weight_params_fit = [0.25 * float(h.max()) if h.size else 1.0, 1.0]
+        elif isinstance(weight_params, dict):
             b = weight_params.get("b", 0.25 * float(h.max()) if h.size else 1.0)
             alpha = weight_params.get("alpha", 1.0)
-            weight_params = [b, alpha]
-        # expect [b, alpha] for all schemes (alpha ignored for 'inverse linear weighting'/'exponential weighting')
-        weights = compute_distance_weights(h, m, weight_type=weight_fn, weight_params=weight_params)
+            weight_params_fit = [b, alpha]
+        else:
+            weight_params_fit = weight_params
 
-    # initial guess & bounds (use model_type)
-    x0, bounds = make_init_and_bounds(model_type, h, g, xmax_factor=max_lagfit_factor, fix_alpha = fix_alpha)
+        weights = compute_distance_weights(
+            h, m, weight_type=weight_fn, weight_params=weight_params_fit
+        )
 
-    #  optimize
+    x0, bounds = make_init_and_bounds(
+        model_type, h, g, xmax_factor=max_lagfit_factor, fix_alpha=fix_alpha
+    )
+
     res = minimize(
         fun=lambda th: objective_func(th, h, g, weights, correlationmodel_fn),
         x0=x0,
-        bounds=bounds
-        # method="L-BFGS-B"
+        bounds=bounds,
     )
-    theta_hat = res.x
+    if not res.success:
+        raise RuntimeError(f"Correlation-model optimization failed: {res.message}")
+    theta_hat = np.asarray(res.x, float)
 
-    # get rsquared fit
+    # Enforce fixed parameters exactly after optimization
+    if fix_alpha:
+        theta_hat[-1] = 1.0
+
     g_fit_bins = correlationmodel_fn(h, *theta_hat)
     r2_wls = r2_score_weighted(g, g_fit_bins, w=weights)
     r2_ols = r2_score_weighted(g, g_fit_bins, w=None)
 
-    # store parameters
     params = pack_params(model_type, theta_hat)
+    params.pop("bootstrap", None)
+    param_keys = list(params.keys())
 
-    # smooth curve for plotting
-    xlag_fit = np.linspace(0.0, float(max(h_lag[:,0])+bin_size/2), 1000)
+    xlag_fit = np.linspace(0.0, float(np.max(h_lag[:, 0]) + bin_size / 2.0), 1000)
     rho_pred = correlationmodel_fn(xlag_fit, *theta_hat)
 
-    # Create Plot for Semi-variance
+    # -------------------------------------------------
+    # bootstrap
+    # -------------------------------------------------
+    boot = None
+    if bootstrap is not None:
+        n_boot = int(bootstrap)
+        if n_boot < 1:
+            raise ValueError("bootstrap must be None or a positive integer.")
+
+        method = str(bootstrap_method).lower()
+        if method not in {"pair", "point"}:
+            raise ValueError("bootstrap_method must be 'pair' or 'point'.")
+
+        qlo, qhi = map(float, bootstrap_ci)
+        if not (0.0 <= qlo < qhi <= 100.0):
+            raise ValueError("bootstrap_ci must satisfy 0 <= low < high <= 100.")
+
+        rng = np.random.default_rng(random_state)
+
+        rho_boot = np.full((n_boot, h_full.shape[0]), np.nan, dtype=float)
+        model_boot = np.full((n_boot, xlag_fit.size), np.nan, dtype=float)
+
+        param_boot = {k: np.full(n_boot, np.nan, dtype=float) for k in param_keys}
+        r2_wls_boot = np.full(n_boot, np.nan, dtype=float)
+        r2_ols_boot = np.full(n_boot, np.nan, dtype=float)
+
+        for b_ix in range(n_boot):
+            try:
+                # --------------------------
+                # resample
+                # --------------------------
+                if method == "pair":
+                    draw = rng.integers(0, d.size, size=d.size)
+                    d_b = d[draw]
+                    x_b = x[draw]
+                    y_b = y[draw]
+
+                elif method == "point":
+                    point_draw = rng.integers(0, n, size=n)
+                    values_b = values[point_draw]
+                    coords_b = coords[point_draw]
+
+                    d_b, x_b, y_b = _build_correlation_pair_arrays(
+                        values_b, coords_b, distance_type
+                    )
+
+                # --------------------------
+                # empirical correlogram
+                # --------------------------
+                h_full_b, n_full_b, rho_full_b, h_lag_b, n_obs_b, rho_b = _binned_correlogram_from_pairs(
+                    d_b, x_b, y_b, bin_size, max_distance, correlation_fn, lag_repr=lag_repr
+                )
+
+                rho_boot[b_ix, :] = rho_full_b.ravel()
+
+                # --------------------------
+                # fit model
+                # --------------------------
+                h_b = h_lag_b.ravel()
+                g_b = rho_b.ravel()
+                m_b = n_obs_b.ravel()
+
+                if weight_fn is None or str(weight_fn).lower() == "ols":
+                    weights_b = np.ones_like(h_b, dtype=float)
+                else:
+                    if weight_params is None:
+                        weight_params_b = [0.25 * float(h_b.max()) if h_b.size else 1.0, 1.0]
+                    elif isinstance(weight_params, dict):
+                        wb = weight_params.get("b", 0.25 * float(h_b.max()) if h_b.size else 1.0)
+                        wa = weight_params.get("alpha", 1.0)
+                        weight_params_b = [wb, wa]
+                    else:
+                        weight_params_b = weight_params
+
+                    weights_b = compute_distance_weights(
+                        h_b, m_b, weight_type=weight_fn, weight_params=weight_params_b
+                    )
+
+                x0_b, bounds_b = make_init_and_bounds(
+                    model_type, h_b, g_b, xmax_factor=max_lagfit_factor, fix_alpha=fix_alpha
+                )
+
+                res_b = minimize(
+                    fun=lambda th: objective_func(th, h_b, g_b, weights_b, correlationmodel_fn),
+                    x0=x0_b,
+                    bounds=bounds_b,
+                )
+                if not res_b.success:
+                    continue
+                theta_b = np.asarray(res_b.x, float)
+                if fix_alpha:
+                    theta_b[-1] = 1.0
+
+                model_boot[b_ix, :] = correlationmodel_fn(xlag_fit, *theta_b)
+
+                g_fit_b = correlationmodel_fn(h_b, *theta_b)
+                r2_wls_boot[b_ix] = r2_score_weighted(g_b, g_fit_b, w=weights_b)
+                r2_ols_boot[b_ix] = r2_score_weighted(g_b, g_fit_b, w=None)
+
+                p_b = pack_params(model_type, theta_b)
+                for k in param_keys:
+                    param_boot[k][b_ix] = p_b[k]
+
+            except Exception:
+                continue
+
+        rho_mean, rho_q05, rho_q95, n_rho_success = _bootstrap_summary(rho_boot, qlo, qhi)
+        model_mean, model_q05, model_q95, n_model_success = _bootstrap_summary(model_boot, qlo, qhi)
+
+        boot = {
+            "n_bootstrap": n_boot,
+            "method": method,
+            "ci": (qlo, qhi),
+            "random_state": random_state,
+            "successful_rho_bootstrap": n_rho_success,
+            "successful_model_bootstrap": n_model_success,
+            "h_lag_full": h_full[:, 0].copy(),
+            "n_obs_full": n_full[:, 0].copy(),
+            "rho_samples": rho_boot,
+            "rho_mean": rho_mean,
+            "rho_q05": rho_q05,
+            "rho_q95": rho_q95,
+            "xlag_fit": xlag_fit.copy(),
+            "model_samples": model_boot,
+            "model_mean": model_mean,
+            "model_q05": model_q05,
+            "model_q95": model_q95,
+            "param_samples": param_boot,
+            "r2_wls_samples": r2_wls_boot,
+            "r2_ols_samples": r2_ols_boot,
+        }
+
+    if boot is not None:
+        params["bootstrap"] = boot
+
+    # -------------------------------------------------
+    # plot
+    # -------------------------------------------------
     if plot:
-        fig = plt.figure(figsize=(12,7),dpi = 200)
-        # set height ratios for subplots
+        fig = plt.figure(figsize=(12, 7), dpi=200)
         gs_plot = gridspec.GridSpec(2, 1, height_ratios=[1, 3])
 
-        # the first subplot
         ax0 = plt.subplot(gs_plot[0])
-        ax0.bar(h_lag[:,0],n_obs[:,0], edgecolor='black', align='center', width=bin_size/2)
-        ax0.grid(which = 'minor')
+        ax0.bar(
+            h_lag[:, 0], n_obs[:, 0],
+            edgecolor="black", align="center", width=bin_size / 2.0
+        )
+        ax0.grid(which="minor")
         yt = ax0.get_yticks()
         if yt.size > 1:
             ax0.set_yticks(yt[1:])
-        # the second subplot
-        # shared axis X
-        ax1 = plt.subplot(gs_plot[1], sharex = ax0)
-        ax1.plot(h_lag[:,0],rho[:,0],'o',markeredgecolor='black')
-        ax1.plot()
-        ax1.plot(xlag_fit, rho_pred, '-k')
-        ax1.axhline(0.0, color='k', lw=1.0, ls='--', alpha=0.7)
+
+        ax1 = plt.subplot(gs_plot[1], sharex=ax0)
+
+        # experimental points
+        ax1.plot(
+            h_lag[:, 0], rho[:, 0],
+            "o", markeredgecolor="black", color="tab:blue",
+            label="Experimental", zorder=5
+        )
+
+        # bootstrap fitted curves + mean + CI
+        if boot is not None:
+            first = True
+            alpha_samples = None
+
+            if "param_samples" in boot:
+                if "alpha" in boot["param_samples"]:
+                    alpha_samples = np.asarray(boot["param_samples"]["alpha"], float)
+                elif ("c0" in boot["param_samples"]) and ("b" in boot["param_samples"]):
+                    c0_s = np.asarray(boot["param_samples"]["c0"], float)
+                    b_s = np.asarray(boot["param_samples"]["b"], float)
+                    s2_s = c0_s + b_s
+                    alpha_samples = np.where(s2_s > 0.0, c0_s / s2_s, np.nan)
+
+            for i, yb in enumerate(boot["model_samples"]):
+                if not np.any(np.isfinite(yb)):
+                    continue
+
+                alpha_i = 1.0
+                if alpha_samples is not None and i < len(alpha_samples) and np.isfinite(alpha_samples[i]):
+                    alpha_i = float(alpha_samples[i])
+
+                _plot_correlation_model_piecewise(
+                    ax1,
+                    xlag_fit,
+                    yb,
+                    params={"alpha": alpha_i},
+                    color="0.7",
+                    lw=0.8,
+                    ls="-",
+                    label="Bootstrap samples" if first else None,
+                    zorder=1,
+                    alpha_plot=0.20,
+                    show_zero_point=False,
+                )
+
+                first = False
+
+            alpha_band = 1.0
+            if alpha_samples is not None and np.any(np.isfinite(alpha_samples)):
+                alpha_band = float(np.nanmean(alpha_samples))
+
+            has_nugget_band = np.isfinite(alpha_band) and (alpha_band < (1.0 - 1e-12))
+
+            if np.any(np.isfinite(boot["model_q05"])) and np.any(np.isfinite(boot["model_q95"])):
+                if has_nugget_band:
+                    pos = xlag_fit > 0
+                    ax1.fill_between(
+                        xlag_fit[pos],
+                        boot["model_q05"][pos],
+                        boot["model_q95"][pos],
+                        color="tab:orange",
+                        alpha=0.20,
+                        label=f"Bootstrap {boot['ci'][0]:g}-{boot['ci'][1]:g}% CI",
+                        zorder=2
+                    )
+                else:
+                    ax1.fill_between(
+                        xlag_fit,
+                        boot["model_q05"],
+                        boot["model_q95"],
+                        color="tab:orange",
+                        alpha=0.20,
+                        label=f"Bootstrap {boot['ci'][0]:g}-{boot['ci'][1]:g}% CI",
+                        zorder=2
+                    )
+
+            if np.any(np.isfinite(boot["model_mean"])):
+                boot_mean_params = {"alpha": float(alpha_band)} if np.isfinite(alpha_band) else {"alpha": 1.0}
+
+                _plot_correlation_model_piecewise(
+                    ax1,
+                    xlag_fit,
+                    boot["model_mean"],
+                    params=boot_mean_params,
+                    color="tab:orange",
+                    lw=2.0,
+                    ls="-",
+                    label="Bootstrap mean",
+                    zorder=3
+                )
+
+
+        # main fitted curve
+        _plot_correlation_model_piecewise(
+            ax1,
+            xlag_fit,
+            rho_pred,
+            params=params,
+            color="k",
+            lw=2.0,
+            ls="-",
+            label=r"Model, $R^2$ (WLS|OLS) = %.2f|%.2f" % (r2_wls, r2_ols),
+            zorder=4
+        )
+
+        ax1.axhline(0.0, color="k", lw=1.0, ls="--", alpha=0.7)
         plt.setp(ax0.get_xticklabels(), visible=False)
 
-        # remove last tick label for the second subplot
         yticks = ax1.yaxis.get_major_ticks()
-        yticks[-1].label1.set_visible(True)
-        ax0.set_ylabel('Number of Lags, N', labelpad=22)
-        ax0.set_ylim(0, max(n_obs[:,0]))
+        if yticks:
+            yticks[-1].label1.set_visible(True)
 
-        # set legend
-        ax1.legend(['Experimental', r'Model, $R^2$ (WLS|OLS) = %.2f|%.2f'%(r2_wls, r2_ols)], loc='lower left')
+        ax0.set_ylabel("Number of Lags, N", labelpad=22)
+        ax0.set_ylim(0, max(n_obs[:, 0]))
 
-        # set minor ticks
-        ax1.set_xticks(h_lag[:,0])
-        ax0.xaxis.grid(True, which='major',linestyle='--')
-        ax1.xaxis.grid(True, which='major',linestyle='--')
+        ax1.legend(loc="lower left")
+
+        ax1.set_xticks(h_lag[:, 0])
+
+        num_ticks = len(h_lag[:, 0])
+
+        if num_ticks <= 30:
+            step = 1
+        elif num_ticks <= 50:
+            step = 2
+        elif num_ticks <= 70:
+            step = 3
+        elif num_ticks <= 90:
+            step = 4
+        else:
+            step = max(1, num_ticks // 20)
+
+        for i, label in enumerate(ax1.get_xticklabels()):
+            if i % step != 0:
+                label.set_visible(False)
+
+        ax0.xaxis.grid(True, which="major", linestyle="--")
+        ax1.xaxis.grid(True, which="major", linestyle="--")
         ax1.set_yticks([-1.00, -0.75, -0.50, -0.25, 0.00, 0.25, 0.50, 0.75, 1.00])
 
-        # remove vertical gap between subplots
-        plt.xlim(0, max(h_lag[:,0])+bin_size/2)
-        plt.ylim(-1,1)
-        plt.ylabel(r'Correlation Coefficient, $\rho$ (%s)'%correlation_type)
-        plt.xlabel('lag distance')
-        plt.subplots_adjust(hspace=.0)
-        plt.show(fig)
-    else:
-        pass
+        ax1.set_xlim(0, float(np.max(h_lag[:, 0]) + bin_size / 2.0))
+        ax1.set_ylim(-1, 1)
+        ax1.set_ylabel(r"Correlation Coefficient, $\rho$ (%s)" % correlation_type)
+        ax1.set_xlabel("lag distance")
+        plt.subplots_adjust(hspace=0.0)
+        plt.show()
 
     return h_lag, n_obs, rho, params, r2_wls, r2_ols
 
 # Main Function: correfitmulti
-def correfitmulti(
-    df,
-    values_col,
-    index_col,
-    coord_cols,
-    distance_type,
-    max_distance,
-    bin_size,
-    correlation_type,
-    model_type,
-    weight_fn=None,
-    weight_params=None,
-    max_lagfit_factor=2.0,
-    fix_alpha=True,
-    plot_single =False,
-    plot_summary =False,
-):
+def correfitmulti(df, values_col, index_col, coord_cols, distance_type,
+                  max_distance, bin_size, correlation_type, model_type,
+                  weight_fn=None, weight_params=None, max_lagfit_factor=2.0,
+                  fix_alpha=True, plot_single=False, plot_summary=False,
+                  lag_repr="center"):
     """
-    Fit an empirical correlogram per group in `index_col` and summarize results.
-
-    For each group:
-      1) Build pairwise distances and bin by lag.
-      2) Estimate empirical correlation per bin (Pearson centered/uncentered or Spearman).
-      3) Fit a parametric correlation model (e.g., exponential, Gaussian, Matérn) by
-         weighted least squares, with optional distance/pair-count weighting.
-      4) Store fitted parameters, weighted R^2, and binned statistics.
+    Fit a correlogram separately for each group in a dataframe.
 
     Parameters
     ----------
     df : pandas.DataFrame
-        Input table with values, grouping IDs, and coordinates.
+        Input dataframe containing values, group IDs, and coordinates.
     values_col : str
-        Column containing the variable to correlate (e.g., 'PGA').
+        Column containing the values to correlate.
     index_col : str
-        Column identifying groups (e.g., event ID); fitting is independent per group.
-    coord_cols : (str, str) or list[str]
-        If distance_type == 'geographic': (lat_col, lon_col) in degrees.
-        If distance_type == 'cartesian' : (x, y)
-        If distance_type == 'euclidean' or 'angular': one or more coordinate columns.
-    distance_type : {'geographic','euclidean','cartesian','angular'}
-        Distance metric for binning pairs by lag.
+        Column used to define independent groups.
+    coord_cols : list or tuple
+        Coordinate columns used to compute lag distances.
+    distance_type : {'geographic', 'euclidean', 'cartesian', 'angular'}
+        Distance metric used to form lag bins.
     max_distance : float
-        Maximum separation considered; defines number of lag bins.
+        Maximum lag distance included in each fit.
     bin_size : float
-        Bin width for lag classes.
-    correlation_type : {'pearsonr','uncentered pearsonr','spearman'}
-        Per-bin correlation estimator.
-    model_type : {'spherical','exponential','gaussian','cubic','powered_exponential','matern','damped_cosine_angle'}
-        Correlation kernel to fit.
-    weight_fn : {'ols','inverse-linear weighting','exponential weighting','powered weighting', None}, optional
-        Bin weights. None/'ols' gives equal weights; others apply distance decay and
-        multiply by pair counts.
+        Width of each lag bin.
+    correlation_type : {'pearsonr', 'uncentered pearsonr', 'spearman'}
+        Correlation estimator used within each lag bin.
+    model_type : str
+        Name of the correlation kernel to fit.
+    weight_fn : str or None, optional
+        Weighting scheme used in the fit.
     weight_params : dict or list, optional
-        Parameters for the weighting (e.g., {'b': scale, 'alpha': power}).
+        Parameters used by the weighting scheme.
     max_lagfit_factor : float, default 2.0
-        Upper cap for range-like parameters (e.g., r, angular c) as multiple of max(h)
-        to prevent near-flat solutions on flexible kernels.
+        Upper cap for range-like model parameters.
     fix_alpha : bool, default True
-        If True, fix nugget scale alpha=1 (no nugget). If False, estimate alpha ∈ (0,1].
+        If True, fit without a nugget jump. If False, estimate `alpha`.
     plot_single : bool, default False
-        Plot per-group correlogram fit during the loop.
+        If True, plot each group fit as it is computed.
     plot_summary : bool, default False
-        After all groups, plot all empirical points (colored by n_obs) and overlay
-        the mean / median model and 5–95% band across fitted parameters.
+        If True, plot all group fits together with mean/median summary curves.
+    lag_repr : {'center', 'edge', 'upper'}, default 'center'
+        Representative lag attached to each equal-width bin. This controls the
+        x-axis used in the returned wide lag tables and in the per-group fitting,
+        but does not change bin membership.
 
     Returns
     -------
     summary : pandas.DataFrame
-        One row per group with counts (n_samples, n_bins), mean/std of values,
-        weighted R^2, and fitted parameters in consistent columns.
+        One row per group with fitted parameters and fit statistics.
     df_n_obs : pandas.DataFrame
-        Wide matrix of bin pair counts (columns = groups, first column = 'h_lag').
+        Pair counts by representative lag value and group.
     df_rho : pandas.DataFrame
-        Wide matrix of empirical correlations (columns = groups, first column = 'h_lag').
+        Empirical correlations by representative lag value and group.
     results : dict
-        Mapping {group_id: (h_lag, n_obs, rho, params_dict, r2_wls, r2_ols)} for downstream use.
+        Raw fit results for each group.
+
+    Notes
+    -----
+    This is a grouped wrapper around `correfit`.
+
+    For `distance_type='angular'`, the supplied angular coordinates are assumed to be in degrees.
     """
 
     results = {}
     summary_rows = []
 
-    # full list of bin centers (global index for wide frames)
+    # full list of representative lag values (global index for wide frames)
     nmax = int(np.ceil(float(max_distance) / float(bin_size)))
-    full_h = (bin_size / 2.0) + np.arange(nmax, dtype=float) * float(bin_size)
+    full_h = _make_lag_axis(nmax, bin_size, lag_repr=lag_repr)
 
     # guard against fp drift when matching later
     full_h = np.round(full_h, 12)
@@ -1179,12 +1893,26 @@ def correfitmulti(
             lat = gdf[coord_cols[0]].to_numpy(dtype=float)
             lon = gdf[coord_cols[1]].to_numpy(dtype=float)
             coords = np.column_stack([lat, lon])
+
+        elif distance_type == 'cartesian':
+            x = gdf[coord_cols[0]].to_numpy(dtype=float)
+            y = gdf[coord_cols[1]].to_numpy(dtype=float)
+            coords = np.column_stack([x, y])
+
         elif distance_type == 'euclidean':
             coords = gdf[list(coord_cols)].to_numpy(dtype=float)
-        else:
-            raise ValueError("distance_type must be 'geographic' or 'euclidean'")
 
-        # call variofit main function
+        elif distance_type == 'angular':
+            if isinstance(coord_cols, str):
+                coords = gdf[coord_cols].to_numpy(dtype=float)
+            elif isinstance(coord_cols, (list, tuple)) and len(coord_cols) == 1:
+                coords = gdf[coord_cols[0]].to_numpy(dtype=float)
+            else:
+                raise ValueError("For angular distance_type, provide a single column in coord_cols.")
+        else:
+            raise ValueError("distance_type must be 'geographic', 'cartesian', 'euclidean', or 'angular'")
+
+        # call correfit main function
         res = correfit(
             values=vals,
             coordinates=coords,
@@ -1198,6 +1926,7 @@ def correfitmulti(
             max_lagfit_factor=max_lagfit_factor,
             fix_alpha=fix_alpha,
             plot=plot_single,
+            lag_repr=lag_repr,
         )
 
         h_lag, n_obs, rho, params, r2_wls, r2_ols = res
@@ -1207,7 +1936,7 @@ def correfitmulti(
 
         # lock param column order from the first group
         if param_keys is None:
-            param_keys = list(params.keys())
+            param_keys = [k for k, v in params.items() if np.isscalar(v)]
 
         # align this group's vectors to the global bin axis
         # round to avoid tiny fp mismatches
@@ -1246,7 +1975,7 @@ def correfitmulti(
         sc = ax.scatter(
             M['h_lag'].to_numpy(),
             M['rho'].to_numpy(),
-            c=M['n_obs'].to_numpy(),      # <-- single '=' and 1D
+            c=M['n_obs'].to_numpy(),
             s=12,
             cmap=plt.get_cmap("coolwarm"),
             norm=mpl.colors.LogNorm(vmin=1),
@@ -1256,8 +1985,9 @@ def correfitmulti(
             zorder = 1
         )
 
-        # semivariogram model fit plots
-        xlag_fit = np.linspace(0.0, float(max_distance), 1000)
+        # correlation model fit plots
+        x_plot_max = float(np.max(full_h) + bin_size / 2.0)
+        xlag_fit = np.linspace(0.0, x_plot_max, 1000)
         fn = CORRELATION_MODELS[model_type]
 
         # unpack values for plotting
@@ -1280,23 +2010,592 @@ def correfitmulti(
         y_95 = fn(xlag_fit, *theta_95)
 
         # plot mean + band
-        ax.plot(xlag_fit, y_mean, color='k', lw=1.5, label='mean fit', zorder=1000)
-        ax.plot(xlag_fit, y_median, color='k', ls = '--', lw=1.5, label='median fit', zorder=1000)
-        ax.fill_between(xlag_fit, y_5, y_95, color='forestgreen', alpha=0.15, label='5–95% CI fit', zorder=0)
+        alpha_mean = float(np.nanmean(summary["alpha"]))
+        alpha_median = float(np.nanmedian(summary["alpha"]))
+
+        has_nugget_band = np.isfinite(alpha_mean) and (alpha_mean < (1.0 - 1e-12))
+
+        if has_nugget_band:
+            pos = xlag_fit > 0
+            ax.fill_between(
+                xlag_fit[pos], y_5[pos], y_95[pos],
+                color='forestgreen', alpha=0.15, label='5–95% CI fit', zorder=0
+            )
+        else:
+            ax.fill_between(
+                xlag_fit, y_5, y_95,
+                color='forestgreen', alpha=0.15, label='5–95% CI fit', zorder=0
+            )
+
+        mean_params = {"alpha": alpha_mean}
+        median_params = {"alpha": alpha_median}
+
+        _plot_correlation_model_piecewise(
+            ax, xlag_fit, y_mean, mean_params,
+            color='k', lw=1.5, ls='-', label='mean fit', zorder=1000
+        )
+        _plot_correlation_model_piecewise(
+            ax, xlag_fit, y_median, median_params,
+            color='k', lw=1.5, ls='--', label='median fit', zorder=1000
+        )
 
         for gid, (h_lag_g, n_obs_g, rho_g, params_g, r2_wls_g, r2_ols_g) in results.items():
             theta_g = theta_from_params(params_g, model_type)
             y_fit_g = fn(xlag_fit, *theta_g)
-            ax.plot(xlag_fit, y_fit_g, '-k', lw=0.2, alpha=0.8)
+            _plot_correlation_model_piecewise(
+                ax, xlag_fit, y_fit_g, params_g,
+                color='k', lw=0.2, ls='-', zorder=2, alpha_plot=0.8,
+                show_zero_point=False
+            )
 
         cb = plt.colorbar(sc, ax=ax, pad =0.02, fraction=0.04, aspect=40)
         cb.set_label('Observations per bin, n')
         ax.legend(loc='lower left', frameon=False)
         ax.set_xlabel("lag distance")
         ax.set_ylabel(r'Correlation Coefficient, $\rho$ (%s)' % correlation_type)
-        ax.set_xlim(0,max_distance)
+        ax.set_xlim(0,x_plot_max)
         ax.set_ylim(-1, 1)
         ax.grid(True, linestyle='--', alpha=0.3)
         plt.show()
 
     return summary, df_n_obs, df_rho, results
+
+# Main function: single cross-correlation fit
+def _build_crosscorrelation_pair_arrays(values1, values2, coordinates, distance_type):
+    """
+    Build directional cross-correlation pair arrays:
+        d = pair distances
+        x = values1 at site i
+        y = values2 at site j
+
+    Uses all off-diagonal directional pairs (i,j), i != j.
+    """
+    values1 = np.asarray(values1, float)
+    values2 = np.asarray(values2, float)
+    coords = np.asarray(coordinates, float)
+
+    if values1.shape != values2.shape:
+        raise ValueError("values1 and values2 must have the same shape")
+
+    n = len(values1)
+    if n < 2:
+        raise ValueError("Need at least 2 points to compute a cross-correlogram.")
+
+    dt = str(distance_type).lower()
+
+    if dt == "geographic":
+        lat = coords[:, 0]
+        lon = coords[:, 1]
+        distance = np.asarray(
+            haversine_oq(lon, lat, lon, lat, radians=False, earth_rad=6371.227),
+            dtype=float
+        )
+
+    elif dt == "cartesian":
+        if coords.shape[1] != 2:
+            raise ValueError("cartesian requires coordinates shape (n,2): (x, y)")
+        dx = coords[:, None, 0] - coords[None, :, 0]
+        dy = coords[:, None, 1] - coords[None, :, 1]
+        distance = np.hypot(dx, dy)
+
+    elif dt == "euclidean":
+        diff = coords[:, None, :] - coords[None, :, :]
+        distance = np.linalg.norm(diff, axis=-1)
+
+    elif dt == "angular":
+        theta_deg = np.asarray(coords, float)
+        if theta_deg.ndim == 2:
+            if theta_deg.shape[1] != 1:
+                raise ValueError("angular distance requires a single angular coordinate per row.")
+        theta = np.radians(theta_deg.ravel())
+        cos_diff = np.cos(theta[:, None] - theta[None, :])
+        ang_rad = np.arccos(np.clip(cos_diff, -1.0, 1.0))
+        distance = np.degrees(ang_rad)
+
+    else:
+        raise ValueError(
+            "Invalid distance_type: choose 'geographic', 'cartesian', 'angular', or 'euclidean'"
+        )
+
+    i_idx, j_idx = np.where(~np.eye(n, dtype=bool))
+
+    d = distance[i_idx, j_idx]
+    x = values1[i_idx]
+    y = values2[j_idx]
+
+    return d, x, y
+
+def crosscorrefit(values1, values2, coordinates, distance_type, max_distance,
+                  bin_size, correlation_type, model_type, weight_fn=None,
+                  weight_params=None, max_lagfit_factor=2.0,
+                  fix_alpha=True, plot=False, pair_geometry=None, lag_repr="center"):
+    """
+    Estimate an empirical cross-correlogram and fit the same kernel form used in `correfit`.
+
+    Parameters
+    ----------
+    values1, values2 : array-like of float
+        Two variables observed at the same locations.
+    coordinates : array-like
+        Coordinates of the sample locations.
+    distance_type : {'geographic', 'euclidean', 'cartesian', 'angular'}
+        Distance metric used to form lag bins.
+    max_distance : float
+        Maximum lag distance included in the fit.
+    bin_size : float
+        Width of each lag bin.
+    correlation_type : {'pearsonr', 'uncentered pearsonr', 'spearman'}
+        Correlation estimator used within each lag bin.
+    model_type : str
+        Name of the correlation kernel to fit.
+    weight_fn : str or None, optional
+        Weighting scheme used in the fit.
+    weight_params : dict or list, optional
+        Parameters used by the weighting scheme.
+    max_lagfit_factor : float, default 2.0
+        Upper cap for range-like model parameters.
+    fix_alpha : bool, default True
+        If True, fit without a nugget jump. If False, estimate `alpha`.
+    plot : bool, default False
+        If True, plot the empirical cross-correlogram and fitted model.
+    pair_geometry : dict or None, optional
+        Precomputed pair geometry returned by
+        `_prepare_crosscorrelation_geometry`. If provided, the function reuses
+        the same pair indices and lag-bin assignments instead of recomputing
+        them from `coordinates`. This is mainly useful inside
+        `multicrosscorrefit()` when many variable pairs share the same sites
+        and distance settings.
+    lag_repr : {'center', 'edge', 'upper'}, default 'center'
+        Representative lag attached to each equal-width bin:
+        - 'center': midpoint of [k*bin_size, (k+1)*bin_size)
+        - 'edge'/'upper': upper edge of [k*bin_size, (k+1)*bin_size)
+
+        This affects the x-values used for plotting, weighting, and fitting, but
+        does not change which pairs fall into each bin.
+    Returns
+    -------
+    h_lag : ndarray
+        Representative lag values of the retained bins, according to `lag_repr`.
+    n_obs : ndarray
+        Number of directional pairs in each retained bin.
+    rho : ndarray
+        Empirical cross-correlation in each retained bin.
+    params : dict
+        Fitted model parameters in the same format returned by `correfit`.
+    r2_wls : float
+        Weighted R² from the fitted model.
+    r2_ols : float
+        Ordinary R² from the fitted model.
+
+    Notes
+    -----
+    This fits the spatial shape of the cross-correlogram only. It does not
+    introduce a separate same-site cross-correlation amplitude.
+
+    For `distance_type='angular'`, the supplied angular coordinates are assumed to be in degrees.
+    """
+
+    values1 = np.asarray(values1, float)
+    values2 = np.asarray(values2, float)
+    coords = np.asarray(coordinates, float)
+
+    if values1.shape != values2.shape:
+        raise ValueError("values1 and values2 must have the same shape")
+
+    if model_type not in CORRELATION_MODELS:
+        raise ValueError(f"Invalid model_type: {model_type}")
+
+    # estimator
+    if correlation_type == "uncentered pearsonr":
+        correlation_fn = pearsonr_uncen
+    elif correlation_type == "pearsonr":
+        correlation_fn = pearsonr_cen
+    elif correlation_type == "spearman":
+        correlation_fn = spearmanr_bin
+    else:
+        raise ValueError("Invalid estimator: choose from 'uncentered pearsonr', 'pearsonr', or 'spearman'")
+
+    model_fn = CORRELATION_MODELS[model_type]
+
+    # empirical cross-correlogram
+    if pair_geometry is None:
+        d, x, y = _build_crosscorrelation_pair_arrays(values1, values2, coords, distance_type)
+        h_full, n_full, rho_full, h_lag, n_obs, rho = _binned_correlogram_from_pairs(
+            d, x, y, bin_size, max_distance, correlation_fn, lag_repr=lag_repr
+        )
+    else:
+        expected_h = _make_lag_axis(
+            int(np.ceil(float(max_distance) / float(bin_size))),
+            bin_size,
+            lag_repr=lag_repr,
+        )
+        h_pair = np.asarray(pair_geometry["h_full"], float).ravel()
+
+        if h_pair.shape != expected_h.shape or not np.allclose(h_pair, expected_h):
+            raise ValueError(
+                "pair_geometry is inconsistent with the requested lag_repr/bin grid. "
+                "Rebuild pair_geometry with the same max_distance, bin_size, and "
+                "lag_repr passed to crosscorrefit()."
+            )
+
+        h_full, n_full, rho_full, h_lag, n_obs, rho = _binned_correlogram_from_precomputed_pairs(
+            values1, values2, pair_geometry, correlation_fn
+        )
+
+    if h_lag.size == 0:
+        raise ValueError(
+            "No valid lag bins with a defined empirical correlation were found. "
+            "Check the data, bin_size, max_distance, and minimum usable pairs per bin."
+        )
+
+    h = h_lag.ravel()
+    g = rho.ravel()
+    m = n_obs.ravel()
+
+    if weight_fn is None or str(weight_fn).lower() == "ols":
+        weights = np.ones_like(h, dtype=float)
+    else:
+        if weight_params is None:
+            weight_params_fit = [0.25 * float(h.max()) if h.size else 1.0, 1.0]
+        elif isinstance(weight_params, dict):
+            bpar = weight_params.get("b", 0.25 * float(h.max()) if h.size else 1.0)
+            apar = weight_params.get("alpha", 1.0)
+            weight_params_fit = [bpar, apar]
+        else:
+            weight_params_fit = weight_params
+
+        weights = compute_distance_weights(
+            h, m, weight_type=weight_fn, weight_params=weight_params_fit
+        )
+
+    x0, bounds = make_init_and_bounds(
+        model_type, h, g, xmax_factor=max_lagfit_factor, fix_alpha=fix_alpha
+    )
+
+    res = minimize(
+        fun=lambda th: objective_func(th, h, g, weights, model_fn),
+        x0=x0,
+        bounds=bounds,
+    )
+    if not res.success:
+        raise RuntimeError(f"Cross-correlation-model optimization failed: {res.message}")
+    theta_hat = np.asarray(res.x, float)
+
+    if fix_alpha:
+        theta_hat[-1] = 1.0
+
+    g_fit_bins = model_fn(h, *theta_hat)
+    r2_wls = r2_score_weighted(g, g_fit_bins, w=weights)
+    r2_ols = r2_score_weighted(g, g_fit_bins, w=None)
+
+    params = pack_params(model_type, theta_hat)
+
+    xlag_fit = np.linspace(0.0, float(np.max(h_lag[:, 0]) + bin_size / 2.0), 1000)
+    rho_pred = model_fn(xlag_fit, *theta_hat)
+
+    if plot:
+        fig = plt.figure(figsize=(12, 7), dpi=200)
+        gs_plot = gridspec.GridSpec(2, 1, height_ratios=[1, 3])
+
+        ax0 = plt.subplot(gs_plot[0])
+        ax0.bar(
+            h_lag[:, 0], n_obs[:, 0],
+            edgecolor="black", align="center", width=bin_size / 2.0
+        )
+        ax0.grid(which="minor")
+        yt = ax0.get_yticks()
+        if yt.size > 1:
+            ax0.set_yticks(yt[1:])
+
+        ax1 = plt.subplot(gs_plot[1], sharex=ax0)
+
+        ax1.plot(
+            h_lag[:, 0], rho[:, 0],
+            "o", markeredgecolor="black", color="tab:blue",
+            label="Cross experimental", zorder=5
+        )
+
+        _plot_correlation_model_piecewise(
+            ax1,
+            xlag_fit,
+            rho_pred,
+            params=params,
+            color="k",
+            lw=2.0,
+            ls="-",
+            label=r"Model, $R^2$ (WLS|OLS) = %.2f|%.2f" % (r2_wls, r2_ols),
+            zorder=4,
+            show_zero_point=True
+        )
+
+        ax1.axhline(0.0, color="k", lw=1.0, ls="--", alpha=0.7)
+        plt.setp(ax0.get_xticklabels(), visible=False)
+
+        ax0.set_ylabel("Number of Lags, N", labelpad=22)
+        ax0.set_ylim(0, max(n_obs[:, 0]) if n_obs.size else 1)
+
+        ax1.legend(loc="lower left")
+        ax1.set_xticks(h_lag[:, 0])
+
+        num_ticks = len(h_lag[:, 0])
+
+        if num_ticks <= 30:
+            step = 1
+        elif num_ticks <= 50:
+            step = 2
+        elif num_ticks <= 70:
+            step = 3
+        elif num_ticks <= 90:
+            step = 4
+        else:
+            step = max(1, num_ticks // 20)
+
+        for i, label in enumerate(ax1.get_xticklabels()):
+            if i % step != 0:
+                label.set_visible(False)
+
+        ax0.xaxis.grid(True, which="major", linestyle="--")
+        ax1.xaxis.grid(True, which="major", linestyle="--")
+        ax1.set_yticks([-1.00, -0.75, -0.50, -0.25, 0.00, 0.25, 0.50, 0.75, 1.00])
+
+        ax1.set_xlim(0, float(np.max(h_lag[:, 0]) + bin_size / 2.0))
+        ax1.set_ylim(-1, 1)
+        ax1.set_ylabel(r"Cross-correlation, $\rho_{12}$ (%s)" % correlation_type)
+        ax1.set_xlabel("lag distance")
+        plt.subplots_adjust(hspace=0.0)
+        plt.show()
+
+    return h_lag, n_obs, rho, params, r2_wls, r2_ols
+
+# main function: multicross-fit
+def multicrosscorrefit(df, values_cols, coord_cols, distance_type, max_distance,
+                       bin_size, correlation_type, model_type, weight_fn=None,
+                       weight_params=None, max_lagfit_factor=2.0,
+                       fix_alpha=True, plot_single=False, plot_matrix=False,
+                       lag_repr="center"):
+    """
+    Fit cross-correlograms for all variable pairs in a dataframe.
+
+    Parameters
+    ----------
+    df : pandas.DataFrame
+        Input dataframe containing the variables and coordinates.
+    values_cols : list of str
+        Columns to be paired and fitted.
+    coord_cols : list, tuple, or str
+        Coordinate columns used to compute lag distances.
+    distance_type : {'geographic', 'euclidean', 'cartesian', 'angular'}
+        Distance metric used to form lag bins.
+    max_distance : float
+        Maximum lag distance included in each fit.
+    bin_size : float
+        Width of each lag bin.
+    correlation_type : {'pearsonr', 'uncentered pearsonr', 'spearman'}
+        Correlation estimator used within each lag bin.
+    model_type : str
+        Name of the correlation kernel to fit.
+    weight_fn : str or None, optional
+        Weighting scheme used in the fit.
+    weight_params : dict or list, optional
+        Parameters used by the weighting scheme.
+    max_lagfit_factor : float, default 2.0
+        Upper cap for range-like model parameters.
+    fix_alpha : bool, default True
+        If True, fit without a nugget jump. If False, estimate `alpha`.
+    plot_single : bool, default False
+        If True, plot each pairwise fit during the loop.
+    plot_matrix : bool, default False
+        If True, plot the lower-triangular matrix of pairwise fits.
+    lag_repr : {'center', 'edge', 'upper'}, default 'center'
+        Representative lag attached to each equal-width bin for both the auto-
+        and cross-correlation fits. This affects plotting, weighting, and fitting
+        x-values, but does not change bin membership.
+
+    Returns
+    -------
+    summary : pandas.DataFrame
+        Pairwise fit summary table.
+    results : dict
+        Raw fit results for each variable pair.
+    param_mats : dict[str, pandas.DataFrame]
+        Parameter matrices for each fitted parameter.
+    r2_mats : dict[str, pandas.DataFrame]
+        Matrices of weighted and ordinary R² values.
+
+    Notes
+    -----
+    This is the pairwise wrapper around `crosscorrefit`.
+
+    For `distance_type='angular'`, the supplied angular coordinates are assumed to be in degrees.
+    """
+
+    df = df.copy()
+    values_cols = list(values_cols)
+
+    missing_vals = [c for c in values_cols if c not in df.columns]
+    if missing_vals:
+        raise ValueError(f"Missing value columns in df: {missing_vals}")
+
+    if model_type not in CORRELATION_MODELS:
+        raise ValueError(f"Invalid model_type: {model_type}")
+
+    if distance_type == 'geographic':
+        lat = df[coord_cols[0]].to_numpy(dtype=float)
+        lon = df[coord_cols[1]].to_numpy(dtype=float)
+        coords = np.column_stack([lat, lon])
+
+    elif distance_type == 'cartesian':
+        x = df[coord_cols[0]].to_numpy(dtype=float)
+        y = df[coord_cols[1]].to_numpy(dtype=float)
+        coords = np.column_stack([x, y])
+
+    elif distance_type == 'euclidean':
+        coords = df[list(coord_cols)].to_numpy(dtype=float)
+
+    elif distance_type == 'angular':
+        if isinstance(coord_cols, (list, tuple)) and len(coord_cols) == 1:
+            coords = df[coord_cols[0]].to_numpy(dtype=float)
+        elif isinstance(coord_cols, str):
+            coords = df[coord_cols].to_numpy(dtype=float)
+        else:
+            raise ValueError("For angular distance_type, provide a single column in coord_cols.")
+    else:
+        raise ValueError("distance_type must be 'geographic', 'cartesian', 'euclidean', or 'angular'")
+
+    pair_geometry = _prepare_crosscorrelation_geometry(
+        coords, distance_type, bin_size, max_distance, lag_repr=lag_repr
+    )
+
+    results = {}
+    summary_rows = []
+    param_keys = None
+
+    p = len(values_cols)
+    n_samples = int(len(df))
+
+    for i, vi in enumerate(values_cols):
+        vals_i = df[vi].to_numpy(dtype=float)
+
+        for j in range(i, p):
+            vj = values_cols[j]
+            vals_j = df[vj].to_numpy(dtype=float)
+
+            res = crosscorrefit(
+                values1=vals_i,
+                values2=vals_j,
+                coordinates=coords,
+                distance_type=distance_type,
+                max_distance=max_distance,
+                bin_size=bin_size,
+                correlation_type=correlation_type,
+                model_type=model_type,
+                weight_fn=weight_fn,
+                weight_params=weight_params,
+                max_lagfit_factor=max_lagfit_factor,
+                fix_alpha=fix_alpha,
+                plot=plot_single,
+                pair_geometry=pair_geometry,
+                lag_repr=lag_repr,
+            )
+
+            h_lag, n_obs, rho, params, r2_wls, r2_ols = res
+
+            results[(vi, vj)] = res
+            results[(vj, vi)] = res
+
+            if param_keys is None:
+                param_keys = [k for k, v in params.items() if np.isscalar(v)]
+
+            summary_rows.append({
+                "var_i": vi,
+                "var_j": vj,
+                "type": "auto" if i == j else "cross",
+                "n_samples": n_samples,
+                "n_bins": int(h_lag.shape[0]),
+                "r2_wls": float(r2_wls),
+                "r2_ols": float(r2_ols),
+                **{k: float(params.get(k, np.nan)) for k in param_keys},
+            })
+
+    summary = pd.DataFrame(
+        summary_rows,
+        columns=["var_i", "var_j", "type", "n_samples", "n_bins", "r2_wls", "r2_ols"] + (param_keys or [])
+    )
+
+    idx = values_cols
+    param_mats = {}
+    for k in (param_keys or []):
+        mat = pd.DataFrame(np.nan, index=idx, columns=idx, dtype=float)
+        for a in idx:
+            for b in idx:
+                if (a, b) in results:
+                    params_ab = results[(a, b)][3]
+                    mat.loc[a, b] = float(params_ab.get(k, np.nan))
+        param_mats[k] = mat
+
+    r2_wls_mat = pd.DataFrame(np.nan, index=idx, columns=idx, dtype=float)
+    r2_ols_mat = pd.DataFrame(np.nan, index=idx, columns=idx, dtype=float)
+    for a in idx:
+        for b in idx:
+            if (a, b) in results:
+                _, _, _, _, r2w, r2o = results[(a, b)]
+                r2_wls_mat.loc[a, b] = float(r2w)
+                r2_ols_mat.loc[a, b] = float(r2o)
+
+    r2_mats = {"r2_wls": r2_wls_mat, "r2_ols": r2_ols_mat}
+
+    if plot_matrix:
+        fn = CORRELATION_MODELS[model_type]
+        nmax = int(np.ceil(float(max_distance) / float(bin_size)))
+        x_plot_max = float(np.max(_make_lag_axis(nmax, bin_size, lag_repr=lag_repr)) + bin_size / 2.0)
+        xfit = np.linspace(0.0, x_plot_max, 600)
+
+        fig, axes = plt.subplots(
+            p, p, figsize=(2.4 * p, 2.4 * p), dpi=200, sharex=False, sharey=True
+        )
+
+        if p == 1:
+            axes = np.array([[axes]])
+
+        for i, vi in enumerate(values_cols):
+            for j, vj in enumerate(values_cols):
+                ax = axes[i, j]
+
+                if j > i:
+                    ax.set_axis_off()
+                    continue
+
+                res = results.get((vi, vj), None)
+                if res is None:
+                    ax.set_axis_off()
+                    continue
+
+                h_lag, n_obs, rho_ij, params_ij, r2w, r2o = res
+                h = h_lag.ravel()
+                g = rho_ij.ravel()
+
+                theta = theta_from_params(params_ij, model_type)
+                gfit = fn(xfit, *theta)
+
+                ax.plot(h, g, 'o', ms=2.5, markeredgecolor='black')
+
+                _plot_correlation_model_piecewise(
+                    ax, xfit, gfit, params_ij,
+                    color='k', lw=0.8, ls='-', zorder=2,
+                    show_zero_point=True
+                )
+
+                ax.set_title(f"{vi} × {vj}" if i != j else vi, fontsize=8)
+                ax.set_xlim(0, x_plot_max)
+                ax.set_ylim(-1, 1)
+                ax.grid(True, linestyle='--', alpha=0.2)
+
+                if i == p - 1:
+                    ax.set_xlabel("lag", fontsize=8)
+                if j == 0:
+                    ax.set_ylabel("ρ", fontsize=8)
+
+        plt.tight_layout()
+        plt.show()
+
+    return summary, results, param_mats, r2_mats

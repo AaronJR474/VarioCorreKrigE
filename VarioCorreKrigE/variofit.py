@@ -1,7 +1,10 @@
 """
-This file contains the functions required for estimating the semivariance as well as options to fit desired models to
-the data.
+Utilities for estimating and fitting auto- and cross-semivariograms.
+
+The module supports distance-based and angular lags, optional
+correlation-form output, grouped fitting, and matrix-style summaries.
 """
+
 import warnings
 import numpy as np
 import pandas as pd
@@ -10,17 +13,33 @@ import matplotlib as mpl
 mpl.rcParams.update(mpl.rcParamsDefault)
 from tqdm.auto import tqdm
 from matplotlib import gridspec
-from matplotlib.ticker import MultipleLocator
 from scipy import special
 from scipy.optimize import minimize
 from numba import njit
 from sklearn.neighbors import BallTree
 
-# surpress warnings
+# Suppress noisy pandas performance warnings triggered by wide-frame operations.
 warnings.simplefilter(action="ignore", category=pd.errors.PerformanceWarning)
 
 # plotting utils
 def _set_ylim_from_points_and_fit(ax, gamma_pts, gamma_fit, allow_negative=False, pad_frac=0.05, min_pad=0.1):
+    """
+    Set a sensible y-range from experimental points and fitted values.
+
+    Parameters
+    ----------
+    ax : matplotlib.axes.Axes
+        Axis to update.
+    gamma_pts, gamma_fit : array_like
+        Experimental ordinates and fitted ordinates already being plotted.
+    allow_negative : bool, default False
+        If True, keep both positive and negative values in view.
+        If False, force the lower limit to 0.
+    pad_frac : float, default 0.05
+        Fractional padding based on the plotted data span.
+    min_pad : float, default 0.1
+        Minimum absolute padding added to the limits.
+    """
     y = np.concatenate([np.asarray(gamma_pts).ravel(), np.asarray(gamma_fit).ravel()])
     y = y[np.isfinite(y)]
     if y.size == 0:
@@ -40,23 +59,28 @@ def _set_ylim_from_points_and_fit(ax, gamma_pts, gamma_fit, allow_negative=False
 # Geographical Distance Function
 def haversine_oq(lon1, lat1, lon2, lat2, radians=False, earth_rad=6371.227):
     """
-    Allows to calculate geographical distance
-    using the haversine formula.
+    Compute great-circle distance using the haversine formula.
 
-    :param lon1: longitude of the first set of locations
-    :type lon1: numpy.ndarray
-    :param lat1: latitude of the frist set of locations
-    :type lat1: numpy.ndarray
-    :param lon2: longitude of the second set of locations
-    :type lon2: numpy.float64
-    :param lat2: latitude of the second set of locations
-    :type lat2: numpy.float64
-    :keyword radians: states if locations are given in terms of radians
-    :type radians: bool
-    :keyword earth_rad: radius of the earth in km
-    :type earth_rad: float
-    :returns: geographical distance in km
-    :rtype: numpy.ndarray
+    Parameters
+    ----------
+    lon1, lat1 : array_like or float
+        Longitudes and latitudes of the first set of locations.
+    lon2, lat2 : array_like or float
+        Longitudes and latitudes of the second set of locations.
+    radians : bool, default False
+        If False, inputs are assumed to be in degrees and are converted to radians.
+    earth_rad : float, default 6371.227
+        Earth radius in kilometres.
+
+    Returns
+    -------
+    distance : ndarray
+        Pairwise distance matrix in kilometres with shape (nlocs1, nlocs2).
+
+    Notes
+    -----
+    This function preserves the original OpenQuake-style behaviour used elsewhere
+    in the codebase.
     """
     if not radians:
         cfact = np.pi / 180.
@@ -473,73 +497,226 @@ VARIOGRAM_MODELS = {
     "angular_dissimilarity": angular_dissimilarity,
 }
 
-# Define Fitting Weights
-def compute_distance_weights(h_lag, n_j, weight_type='inverse-linear weighting', weight_params = None):
 
+# Define Fitting Weights
+def compute_distance_weights(h_lag, n_j, weight_type='inverse-linear weighting', weight_params=None):
     """
-    Build per-bin weights for fitting.
+    Compute lag-bin weights for model fitting.
+
+    The returned weights are applied at the bin level in the weighted least-squares
+    objective. Most schemes combine a distance-decay term with the number of pairs
+    falling in the bin.
 
     Parameters
     ----------
-    h_lag : (k,) array_like of float
-        Bin centers (same order as the target vector).
-    n_j : (k,) array_like of float
-        Pair counts per bin.
-    weight_type : {'inverse-linear weighting','exponential weighting','powered weighting', 'linear weighting', None, 'ols'}
-        If None/'ols', returns ones (plain OLS).
-        'inverse-linear weighting': w(h)=n_j * 1/(1+h/b)
-        'exponential weighting'   : w(h)=n_j * exp(-h/b)
-        'powered weighting'     : w(h)=n_j * (1+h/b)^(-alpha)
-        'linear weighting'      : w(h)=n_j * ones(h)
-    weight_params : list[float] | dict | None
-        If list, expected [b, alpha]; if dict, keys {'b','alpha'}.
-        For 'inverse-linear weighting' and 'exponential weighting', only 'b' is used.
+    h_lag : array_like, shape (k,)
+        Lag-bin centres.
+    n_j : array_like, shape (k,)
+        Number of pairs in each lag bin.
+    weight_type : {'inverse-linear weighting', 'inverse-linear squared weighting',
+                   'exponential weighting', 'powered weighting',
+                   'linear weighting', None, 'ols'}, default 'inverse-linear weighting'
+        Weighting rule used to construct the bin weights.
+    weight_params : list, tuple, dict, or None, default None
+        Parameters controlling the chosen weighting rule.
+
+        If a sequence is provided, the expected order is [b, alpha].
+        If a dictionary is provided, the expected keys are {'b', 'alpha'}.
+
+        The parameter `alpha` is only used for 'powered weighting'.
 
     Returns
     -------
-    weights : (k,) ndarray of float
-        Weight per bin.
+    weights : ndarray, shape (k,)
+        Weight assigned to each lag bin.
 
     Raises
     ------
     ValueError
-        If `weight_type` is unknown or required params missing.
+        If the weighting scheme is unknown or required parameters are missing.
     """
-
     h_lag = np.asarray(h_lag, float)
     n_j = np.asarray(n_j, float)
 
+    b = None
+    alpha = None
+
+    if isinstance(weight_params, dict):
+        b = weight_params.get("b", None)
+        alpha = weight_params.get("alpha", None)
+    elif weight_params is not None:
+        wp = list(weight_params)
+        if len(wp) >= 1:
+            b = wp[0]
+        if len(wp) >= 2:
+            alpha = wp[1]
+
     if weight_type == 'inverse-linear weighting':
-        w = n_j * (1.0 / (1.0 + h_lag / weight_params[0]))
+        if b is None or b <= 0:
+            raise ValueError("inverse-linear weighting requires weight_params['b'] > 0")
+        w = n_j / (1.0 + h_lag / b)
+
     elif weight_type == 'exponential weighting':
-        w = n_j * np.exp(-h_lag / weight_params[0])
+        if b is None or b <= 0:
+            raise ValueError("exponential weighting requires weight_params['b'] > 0")
+        w = n_j * np.exp(-h_lag / b)
+
     elif weight_type == 'powered weighting':
-        w = n_j * (1.0 + h_lag / weight_params[0]) ** (-weight_params[1])
+        if b is None or b <= 0 or alpha is None:
+            raise ValueError("powered weighting requires weight_params with b > 0 and alpha")
+        w = n_j * (1.0 + h_lag / b) ** (-alpha)
+
     elif weight_type == 'linear weighting':
         w = n_j * np.ones_like(h_lag, dtype=float)
+
     elif weight_type == 'inverse-linear squared weighting':
-        w = n_j/h_lag**2
+        w = np.where(h_lag > 0.0, n_j / h_lag**2, 0.0)
+
     elif weight_type is None or weight_type == 'ols':
-        w =  np.ones_like(h_lag, dtype=float)
+        w = np.ones_like(h_lag, dtype=float)
+
     else:
-        raise ValueError("Invalid weight_type: choose None/'ols', 'inverse-linear weighting', "
-                         "'inverse-linear squared weighting', 'exponential weighting', 'powered weighting' or 'linear weighting'")
+        raise ValueError(
+            "Invalid weight_type: choose None/'ols', 'inverse-linear weighting', "
+            "'inverse-linear squared weighting', 'exponential weighting', "
+            "'powered weighting' or 'linear weighting'"
+        )
 
     return w
 
 # Objective Function(s) for Fitting
-def objective_func(params, h, gamma, weights, semivario_fn):
+def _expand_theta_fixed_total_sill(model_type, theta_free):
     """
-    Weighted SSE objective: minimize Σ w_i [y_i - model_fn(h_i; θ)]^2.
+    Expand the reduced parameter vector used under the constraint c0 + b = 1.
+
+    When the total sill is fixed to 1 and the nugget is free, the optimizer works
+    with a reduced parameter vector. This helper reconstructs the full parameter
+    vector expected by the variogram model.
+
+    Parameters
+    ----------
+    model_type : str
+        Name of the variogram model.
+    theta_free : array_like
+        Reduced parameter vector used in the constrained optimisation.
+
+    Returns
+    -------
+    theta_full : list[float]
+        Full parameter vector in the order expected by the selected model.
+    """
+    th = list(np.asarray(theta_free, float).ravel())
+
+    if model_type in ("spherical", "exponential", "gaussian", "cubic"):
+        # full: (r, c0, b)
+        r, b = th
+        c0 = 1.0 - b
+        return [r, c0, b]
+
+    elif model_type == "powered_exponential":
+        # full: (r, c0, beta, b)
+        r, beta, b = th
+        c0 = 1.0 - b
+        return [r, c0, beta, b]
+
+    elif model_type == "matern":
+        # full: (r, c0, s, b)
+        r, s, b = th
+        c0 = 1.0 - b
+        return [r, c0, s, b]
+
+    elif model_type in ("damped_cosine_angle", "angular_dissimilarity"):
+        # full: (c, c0, b)
+        c, b = th
+        c0 = 1.0 - b
+        return [c, c0, b]
+
+    else:
+        raise ValueError(f"Unknown model_type: {model_type}")
+
+
+def _compress_init_bounds_fixed_total_sill(model_type, x0_full, bounds_full):
+    """
+    Convert full initial values and bounds to the reduced form used when c0 + b = 1.
+
+    This is the inverse companion to `_expand_theta_fixed_total_sill()`. It removes
+    the redundant sill parameter so the optimiser only sees the free parameters.
+
+    Parameters
+    ----------
+    model_type : str
+        Name of the variogram model.
+    x0_full : sequence of float
+        Initial parameter vector in the full model parameterisation.
+    bounds_full : sequence of tuple
+        Bounds in the full model parameterisation.
+
+    Returns
+    -------
+    x0 : list[float]
+        Reduced initial parameter vector.
+    bounds : list[tuple]
+        Reduced bounds aligned with `x0`.
+    """
+    x0_full = list(np.asarray(x0_full, float).ravel())
+    bounds_full = list(bounds_full)
+
+    b_bounds = (0.0, 1.0)
+
+    if model_type in ("spherical", "exponential", "gaussian", "cubic"):
+        # full: (r, c0, b) -> free: (r, b)
+        x0 = [x0_full[0], np.clip(x0_full[2], 0.0, 1.0)]
+        bounds = [bounds_full[0], b_bounds]
+
+    elif model_type == "powered_exponential":
+        # full: (r, c0, beta, b) -> free: (r, beta, b)
+        x0 = [x0_full[0], x0_full[2], np.clip(x0_full[3], 0.0, 1.0)]
+        bounds = [bounds_full[0], bounds_full[2], b_bounds]
+
+    elif model_type == "matern":
+        # full: (r, c0, s, b) -> free: (r, s, b)
+        x0 = [x0_full[0], x0_full[2], np.clip(x0_full[3], 0.0, 1.0)]
+        bounds = [bounds_full[0], bounds_full[2], b_bounds]
+
+    elif model_type in ("damped_cosine_angle", "angular_dissimilarity"):
+        # full: (c, c0, b) -> free: (c, b)
+        x0 = [x0_full[0], np.clip(x0_full[2], 0.0, 1.0)]
+        bounds = [bounds_full[0], b_bounds]
+
+    else:
+        raise ValueError(f"Unknown model_type: {model_type}")
+
+    return x0, bounds
+
+
+def _objective_func_fixed_total_sill(theta_free, h, g, weights, model_type, semivariomodel_fn):
+    """
+    Objective under the constraint c0 + b = 1.
+    """
+    theta_full = _expand_theta_fixed_total_sill(model_type, theta_free)
+    return objective_func(theta_full, h, g, weights, semivariomodel_fn)
+
+def objective_func(params, h, gamma, weights, semivario_fn):
+
+    """
+    Weighted least-squares objective used for variogram fitting.
+
+    The objective is
+
+        sum_i w_i [gamma_i - model(h_i; theta)]^2.
 
     Parameters
     ----------
     params : sequence of float
-        θ in the order expected by `model_fn`.
-    h, y, weights : (k,) arrays
-        Bin centers, target values (gamma or rho), and weights.
-    model_fn : callable
-        Signature `model_fn(h, *params)` → (k,) array.
+        Model parameters in the order expected by `semivario_fn`.
+    h : array_like, shape (k,)
+        Lag-bin centres.
+    gamma : array_like, shape (k,)
+        Experimental ordinates at the bin centres.
+    weights : array_like, shape (k,)
+        Bin weights.
+    semivario_fn : callable
+        Model function with signature `semivario_fn(h, *params)`.
 
     Returns
     -------
@@ -552,36 +729,41 @@ def objective_func(params, h, gamma, weights, semivario_fn):
 
 def make_init_and_bounds(model, h, gamma, xmax_factor=2.0, fix_nugget=True, fix_sill=False):
     """
-    Initial guesses & bounds for semivariogram models.
+    Build initial values and parameter bounds for a chosen variogram model.
+
+    This is an internal helper used by the fitting routines. At this helper level,
+    `fix_sill=True` means the partial sill parameter `c0` is fixed at 1. In the
+    higher-level fitting functions, additional logic may instead enforce the total
+    sill constraint `c0 + b = 1` when the nugget is free.
 
     Parameters
     ----------
-    model : {'spherical','exponential','gaussian','cubic',
-             'powered_exponential','matern','damped_cosine_angle'}
-    h : array_like (k,)
-        Bin centers.
-    gamma : array_like (k,)
-        Experimental semivariogram at bin centers.
+    model : {'spherical', 'exponential', 'gaussian', 'cubic',
+             'powered_exponential', 'matern', 'damped_cosine_angle',
+             'angular_dissimilarity'}
+        Variogram model name.
+    h : array_like, shape (k,)
+        Lag-bin centres.
+    gamma : array_like, shape (k,)
+        Experimental ordinates at the lag-bin centres.
     xmax_factor : float, default 2.0
-        Upper bound for range-like parameter (r or c_deg): xmax_factor * max(h).
+        Multiplier used to cap the upper bound of the range-like parameter.
     fix_nugget : bool, default True
-        If True, nugget b is fixed at 0.0 (bounds (0,0) and init 0).
+        If True, fix the nugget parameter `b` at 0.
     fix_sill : bool, default False
-        If True, partial sill c0 is fixed at 1.0 (bounds (1,1) and init 1).
+        If True, fix the partial sill parameter `c0` at 1 within this helper.
 
     Returns
     -------
     x0 : tuple
         Initial parameter vector.
-    bounds : tuple of (low, high) tuples
+    bounds : tuple of tuple
         Bounds aligned with `x0`.
 
     Notes
     -----
-    - Range-like params (r or c_deg) lower-bounded >0 and upper-capped at
-      `xmax_factor * max(h)` to prevent near-flat fits on flexible kernels.
-    - If `fix_nugget`, nugget b is fixed at 0 via bounds (0,0).
-    - If `fix_sill`, partial sill c0 is fixed at 1 via bounds (1,1).
+    Range-like parameters are lower-bounded away from zero and upper-bounded by
+    `xmax_factor * max(h)` to reduce unstable near-flat fits.
     """
 
     h = np.asarray(h, float).ravel()
@@ -728,22 +910,22 @@ def r2_score_weighted(y, yhat, w=None):
 def pack_params(model_type, theta):
 
     """
-    Semivariogram-model parameter packing.
+    Pack a fitted parameter vector into a named dictionary.
 
-    Parameter layouts expected by VARIOGRAM_MODELS:
+    The returned dictionary uses parameter names consistent with the selected model,
+    which makes later plotting, reporting, and transformation steps easier to read.
 
-      - spherical / exponential / gaussian / cubic : (r, c0, b)
-      - powered_exponential                        : (r, c0, beta, b)
-      - matern                                     : (r, c0, s, b)      # s = smoothness (ν)
-      - damped_cosine_angle                        : (c, c0, b)         # c = damping angle (degrees)
+    Parameters
+    ----------
+    model_type : str
+        Name of the fitted variogram model.
+    theta : sequence of float
+        Parameter vector in the order expected by that model.
 
-    where
-      r    : effective range (model-specific mapping to 'a')
-      c0   : partial sill
-      b    : nugget
-      beta : shape exponent for powered exponential (0 < beta ≤ 2)
-      s    : Matérn smoothness ν
-      c    : angular damping (degrees) for the damped-cosine model
+    Returns
+    -------
+    params : dict
+        Dictionary mapping parameter names to fitted values.
     """
 
     if model_type in ("spherical", "exponential", "gaussian", "cubic"):
@@ -774,13 +956,540 @@ def theta_from_params(params, model_type):
         raise ValueError("Unknown model_type")
     return [float(params[k]) for k in order]
 
-# Main Function
-def variofit(values, coordinates, distance_type, max_distance, bin_size, estimator_type, model_type, weight_fn,
-             weight_params, xmax_factor = 2.0, fix_nugget = True, fix_sill =  False, plot = False, plot_path = None,
-             balltree_leaf_size=40,max_neighbors=None):
+def _validate_transform(transform):
+    if transform not in (None, "correlation"):
+        raise ValueError("transform must be None or 'correlation'")
 
+
+def _get_total_sill_from_params(params, eps=1e-12):
     """
-    Compute an experimental semivariogram and fit a user-selected variogram model.
+    Extract the total sill c0 + b from a parameter dictionary.
+
+    Parameters
+    ----------
+    params : dict
+        Parameter dictionary expected to contain at least `c0` and optionally `b`.
+    eps : float, default 1e-12
+        Small tolerance used to reject zero or negative sill values.
+
+    Returns
+    -------
+    sill : float
+        Total sill c0 + b.
+
+    Raises
+    ------
+    ValueError
+        If the total sill is missing, non-finite, or not strictly positive.
+    """
+    params = {} if params is None else dict(params)
+    c0 = float(params.get("c0", np.nan))
+    b = float(params.get("b", 0.0))
+    sill = c0 + b
+
+    if not np.isfinite(sill) or sill <= eps:
+        raise ValueError("Total sill c0 + b must be finite and > 0 for correlation transform.")
+    return sill
+
+
+def _gamma_to_correlation(gamma, sill):
+    """
+    Convert semivariogram ordinates to correlation ordinates.
+
+    The transformation is
+
+        rho(h) = 1 - gamma(h) / sill.
+
+    Parameters
+    ----------
+    gamma : array_like
+        Semivariogram ordinates.
+    sill : float
+        Positive sill used for normalization.
+
+    Returns
+    -------
+    rho : ndarray
+        Correlation ordinates on the same shape as `gamma`.
+    """
+    gamma = np.asarray(gamma, float)
+    return 1.0 - gamma / float(sill)
+
+
+def _pack_corr_params_from_vario(model_type, params, eps=1e-12):
+    """
+    Normalize fitted semivariogram parameters into correlation form.
+
+    The range and shape parameters are left unchanged. The sill-related parameters
+    are rescaled so that
+
+        c0 + b = 1.
+
+    Parameters
+    ----------
+    model_type : str
+        Name of the fitted model. Included for interface consistency.
+    params : dict
+        Fitted semivariogram parameters.
+    eps : float, default 1e-12
+        Tolerance passed to the sill check.
+
+    Returns
+    -------
+    params_corr : dict
+        Parameter dictionary in normalized correlation form.
+    """
+    p = dict(params)
+    sill = _get_total_sill_from_params(p, eps=eps)
+
+    p["c0"] = float(p["c0"]) / sill
+    p["b"]  = float(p["b"])  / sill
+    return p
+
+
+def _renormalize_correlation_params(params, eps=1e-12):
+    """
+    Used only for aggregated mean/median params in summary plots so that
+    the correlation-form params remain on the c0 + b = 1 constraint.
+    """
+    p = dict(params)
+    if ("c0" in p) and ("b" in p):
+        s = float(p["c0"]) + float(p["b"])
+        if np.isfinite(s) and s > eps:
+            p["c0"] = float(p["c0"]) / s
+            p["b"]  = float(p["b"])  / s
+    return p
+
+
+def _evaluate_model_from_params(model_type, h, params, transform=None):
+    """
+    Evaluate a fitted model from its parameter dictionary.
+
+    Parameters
+    ----------
+    model_type : str
+        Name of the fitted model.
+    h : array_like
+        Lag values at which the model should be evaluated.
+    params : dict
+        Parameter dictionary for the selected model.
+    transform : {None, 'correlation'}, default None
+        If None, evaluate the model in semivariogram space.
+        If 'correlation', evaluate the normalized correlation-form model.
+
+    Returns
+    -------
+    y : ndarray
+        Model ordinates evaluated at `h`.
+
+    Notes
+    -----
+    For `transform='correlation'`, `params` are assumed to already be normalized so
+    that c0 + b = 1.
+    """
+    h = np.asarray(h, float)
+    theta = theta_from_params(params, model_type)
+    gamma_like = VARIOGRAM_MODELS[model_type](h, *theta)
+
+    if transform is None:
+        return gamma_like
+
+    elif transform == "correlation":
+        # Since c0+b=1 in the normalized correlation-form params,
+        # the positive-lag correlation is just 1 - gamma(h).
+        rho = 1.0 - gamma_like
+
+        # exact zero-lag value is 1, not the 0+ limit
+        rho0 = float(params.get("c0", 0.0)) + float(params.get("b", 0.0))
+        rho = np.where(h == 0.0, rho0, rho)
+        return rho
+
+    else:
+        raise ValueError("transform must be None or 'correlation'")
+
+
+def _plot_correlation_model_piecewise(ax, x, y, params, color="k", lw=2.0, ls="-",
+                                      label=None, zorder=4, alpha_plot=1.0,
+                                      show_zero_point=True, jump_ls=":"):
+    """
+    Plot a correlation model with explicit nugget discontinuity:
+
+        rho(0)  = 1
+        rho(0+) = 1 - b
+
+    Here params are assumed to be in normalized correlation form:
+        c0 + b = 1
+    """
+    x = np.asarray(x, float)
+    y = np.asarray(y, float)
+
+    b0 = float(params.get("b", 0.0))
+    has_nugget = np.isfinite(b0) and (b0 > 1e-12)
+
+    pos = x > 0
+
+    if has_nugget:
+        ax.plot(
+            x[pos], y[pos],
+            color=color, lw=lw, ls=ls, label=label,
+            zorder=zorder, alpha=alpha_plot
+        )
+
+        ax.plot(
+            [0.0, 0.0], [1.0, 1.0 - b0],
+            color=color, lw=max(1.0, lw * 0.8), ls=jump_ls,
+            zorder=zorder, alpha=alpha_plot
+        )
+
+        if show_zero_point:
+            ax.plot(
+                0.0, 1.0, "o",
+                ms=4, mfc="white", mec=color,
+                zorder=zorder + 0.1, alpha=alpha_plot
+            )
+    else:
+        ax.plot(
+            x, y,
+            color=color, lw=lw, ls=ls, label=label,
+            zorder=zorder, alpha=alpha_plot
+        )
+
+# Pair construction and binning helpers
+def _make_lag_axis(nmax, bin_size, lag_repr="center"):
+    """
+    Construct the representative lag value for each equal-width bin.
+
+    Parameters
+    ----------
+    nmax : int
+        Number of bins.
+    bin_size : float
+        Bin width.
+    lag_repr : {"center", "edge", "upper"}, default "center"
+        Representative lag attached to each bin:
+        - "center": midpoint of [k*bin_size, (k+1)*bin_size)
+        - "edge" / "upper": upper edge of [k*bin_size, (k+1)*bin_size)
+
+    Returns
+    -------
+    h_full : ndarray, shape (nmax,)
+        Representative lag values for bins 0..nmax-1.
+    """
+    lag_repr = str(lag_repr).lower().strip()
+
+    if lag_repr == "center":
+        return (bin_size / 2.0) + np.arange(nmax, dtype=float) * float(bin_size)
+    elif lag_repr in ("edge", "upper"):
+        return np.arange(1, nmax + 1, dtype=float) * float(bin_size)
+    else:
+        raise ValueError("lag_repr must be one of {'center', 'edge', 'upper'}.")
+
+def _build_pair_arrays(values, coords, distance_type, max_distance, bin_size,
+                       balltree_leaf_size=40, max_neighbors=None):
+    """
+    Construct pairwise distance and increment arrays for experimental variogram fitting.
+
+    For geographic, cartesian, and euclidean distances, this helper first attempts
+    to build the pair list using a BallTree radius search. If that path does not
+    yield any valid pairs, it falls back to a dense pairwise-distance calculation.
+
+    Parameters
+    ----------
+    values : array_like, shape (n,)
+        Observation values.
+    coords : array_like, shape (n, d)
+        Coordinates associated with the observations.
+    distance_type : {'geographic', 'geographical', 'cartesian', 'euclidean', 'angular'}
+        Distance metric used to define lags.
+    max_distance : float
+        Maximum lag distance retained.
+    bin_size : float
+        Lag-bin width. Included for API symmetry with the binning step; pair
+        retention here is controlled by `max_distance`.
+    balltree_leaf_size : int, default 40
+        Leaf size used by BallTree where applicable.
+    max_neighbors : int or None, default None
+        Optional cap on the number of neighbours retained per point when BallTree
+        is used.
+
+    Returns
+    -------
+    d : ndarray
+        Pairwise distances for the retained i < j pairs.
+    dz : ndarray
+        Absolute increments |z_i - z_j| for the same retained pairs.
+    """
+    values = np.asarray(values, float)
+    coords = np.asarray(coords, float)
+    n = len(values)
+
+    dt = str(distance_type).lower()
+    EARTH_RAD = 6371.227  # km
+
+    d = None
+    dz = None
+
+    use_bt = dt in ("geographic", "geographical", "cartesian", "euclidean")
+
+    if use_bt:
+        if dt in ("geographic", "geographical"):
+            lat_deg = coords[:, 0]
+            lon_deg = coords[:, 1]
+            lat_rad = np.deg2rad(lat_deg)
+            lon_rad = np.deg2rad(lon_deg)
+            pts = np.column_stack([lat_rad, lon_rad])
+
+            tree = BallTree(pts, metric="haversine", leaf_size=balltree_leaf_size)
+            radius = (float(max_distance) + 0.5 * float(bin_size)) / EARTH_RAD
+
+            ind_list, dist_list = tree.query_radius(
+                pts, r=radius, return_distance=True, sort_results=True
+            )
+
+            d_list = []
+            dz_list = []
+            for i in range(n):
+                inds = ind_list[i]
+                dists_rad = dist_list[i]
+
+                mask = inds > i
+                if not np.any(mask):
+                    continue
+
+                js = inds[mask]
+                d_ij = dists_rad[mask] * EARTH_RAD
+
+                if max_neighbors is not None and max_neighbors > 0:
+                    js = js[:max_neighbors]
+                    d_ij = d_ij[:max_neighbors]
+
+                d_list.append(d_ij)
+                dz_list.append(np.abs(values[i] - values[js]))
+
+            if d_list:
+                d = np.concatenate(d_list)
+                dz = np.concatenate(dz_list)
+
+        elif dt in ("cartesian", "euclidean"):
+            pts = coords
+            tree = BallTree(pts, metric="euclidean", leaf_size=balltree_leaf_size)
+            radius = float(max_distance) + 0.5 * float(bin_size)
+
+            ind_list, dist_list = tree.query_radius(
+                pts, r=radius, return_distance=True, sort_results=True
+            )
+
+            d_list = []
+            dz_list = []
+            for i in range(n):
+                inds = ind_list[i]
+                dists = dist_list[i]
+
+                mask = inds > i
+                if not np.any(mask):
+                    continue
+
+                js = inds[mask]
+                d_ij = dists[mask]
+
+                if max_neighbors is not None and max_neighbors > 0:
+                    js = js[:max_neighbors]
+                    d_ij = d_ij[:max_neighbors]
+
+                d_list.append(d_ij)
+                dz_list.append(np.abs(values[i] - values[js]))
+
+            if d_list:
+                d = np.concatenate(d_list)
+                dz = np.concatenate(dz_list)
+
+    # fallback to dense matrix
+    if (d is None) or (dz is None) or (d.size == 0):
+        if dt in ("geographic", "geographical"):
+            lat = coords[:, 0]
+            lon = coords[:, 1]
+            dist_full = np.asarray(
+                haversine_oq(lon, lat, lon, lat, radians=False, earth_rad=EARTH_RAD),
+                dtype=float,
+            )
+        elif dt == "cartesian":
+            if coords.shape[1] != 2:
+                raise ValueError("cartesian requires coordinates shape (n,2): (x, y)")
+            dx = coords[:, None, 0] - coords[None, :, 0]
+            dy = coords[:, None, 1] - coords[None, :, 1]
+            dist_full = np.hypot(dx, dy)
+        elif dt == "euclidean":
+            diff = coords[:, None, :] - coords[None, :, :]
+            dist_full = np.linalg.norm(diff, axis=-1)
+        elif dt == "angular":
+            theta_deg = np.asarray(coords, float)
+            if theta_deg.ndim == 2:
+                if theta_deg.shape[1] != 1:
+                    raise ValueError("angular distance requires a single angular coordinate per row.")
+            theta = np.radians(theta_deg.ravel())
+            cos_diff = np.cos(theta[:, None] - theta[None, :])
+            ang_rad = np.arccos(np.clip(cos_diff, -1.0, 1.0))
+            dist_full = np.degrees(ang_rad)
+        else:
+            raise ValueError(
+                "Invalid distance_type: choose 'geographic', 'geographical', "
+                "'cartesian', 'angular', or 'euclidean'"
+            )
+
+        iu, ju = np.triu_indices(n, k=1)
+        d = dist_full[iu, ju]
+        dz = np.abs(values[iu] - values[ju])
+
+    return d, dz
+
+def _binned_semivariogram_from_pairs(
+    d,
+    dz,
+    bin_size,
+    max_distance,
+    estimator_type,
+    semivarioest_fn,
+    lag_repr="center",
+):
+    """
+    Bin pairwise distances and increments into experimental semivariogram ordinates.
+
+    Pair membership is defined by interval binning:
+        bin k contains distances in [k*bin_size, (k+1)*bin_size),
+    with the final bin capped at `max_distance`.
+
+    Parameters
+    ----------
+    d : array_like
+        Pairwise distances.
+    dz : array_like
+        Pairwise increments |z_i - z_j|.
+    bin_size : float
+        Bin width.
+    max_distance : float
+        Maximum retained lag distance.
+    estimator_type : {'Matheron', 'CressieHawkins', 'Dowd'}
+        Experimental semivariogram estimator.
+    semivarioest_fn : callable
+        Bin-level estimator used when `estimator_type != "Matheron"`.
+    lag_repr : {"center", "edge", "upper"}, default "center"
+        Representative lag attached to each bin:
+        - "center": midpoint of [k*bin_size, (k+1)*bin_size)
+        - "edge"/"upper": upper edge of [k*bin_size, (k+1)*bin_size)
+
+    Returns
+    -------
+    h_full : ndarray, shape (nmax, 1)
+        Representative lag values for all bins.
+    counts_full : ndarray, shape (nmax, 1)
+        Pair counts for all bins.
+    gamma_full : ndarray, shape (nmax, 1)
+        Experimental semivariance for all bins; NaN for empty bins.
+    h_valid : ndarray, shape (k, 1)
+        Representative lag values for non-empty bins.
+    counts_valid : ndarray, shape (k, 1)
+        Pair counts for non-empty bins.
+    gamma_valid : ndarray, shape (k, 1)
+        Experimental semivariance for non-empty bins.
+    """
+    nmax = int(np.ceil(float(max_distance) / float(bin_size)))
+    if nmax <= 0:
+        raise ValueError("max_distance / bin_size must be > 0.")
+
+    d = np.asarray(d, dtype=float).ravel()
+    dz = np.asarray(dz, dtype=float).ravel()
+
+    if d.shape != dz.shape:
+        raise ValueError("d and dz must have the same shape.")
+
+    mask = np.isfinite(d) & np.isfinite(dz) & (d >= 0.0) & (d <= float(max_distance))
+    if not np.any(mask):
+        raise ValueError(
+            "No pair distances fell into [0, max_distance]; check max_distance/bin_size."
+        )
+
+    d_use = d[mask]
+    dz_use = dz[mask]
+
+    bin_idx = np.floor(d_use / float(bin_size)).astype(int)
+    bin_idx = np.minimum(bin_idx, nmax - 1)
+
+    h_full = _make_lag_axis(nmax, bin_size, lag_repr=lag_repr)
+    counts = np.bincount(bin_idx, minlength=nmax).astype(float)
+
+    gamma_full = np.full(nmax, np.nan, dtype=float)
+
+    if estimator_type == "Matheron":
+        sum_w = np.bincount(bin_idx, weights=0.5 * dz_use**2, minlength=nmax)
+        with np.errstate(invalid="ignore", divide="ignore"):
+            gamma_full = sum_w / counts
+        gamma_full[counts == 0] = np.nan
+    else:
+        for k in range(nmax):
+            mask_k = (bin_idx == k)
+            if not np.any(mask_k):
+                continue
+            gamma_full[k] = semivarioest_fn(dz_use[mask_k])
+
+    keep = np.isfinite(gamma_full)
+
+    return (
+        h_full.reshape(-1, 1),
+        counts.reshape(-1, 1),
+        gamma_full.reshape(-1, 1),
+        h_full[keep].reshape(-1, 1),
+        counts[keep].reshape(-1, 1),
+        gamma_full[keep].reshape(-1, 1),
+    )
+
+def _bootstrap_summary(arr, qlo=2.5, qhi=97.5):
+    """
+    Summarise bootstrap samples column-wise.
+
+    Parameters
+    ----------
+    arr : array_like
+        Bootstrap samples with shape (n_boot, n_points) or (n_points,).
+    qlo, qhi : float, default 2.5, 97.5
+        Lower and upper percentiles used for the interval summary.
+
+    Returns
+    -------
+    mean : ndarray
+        Column-wise mean across valid bootstrap samples.
+    q_low : ndarray
+        Lower percentile bound.
+    q_high : ndarray
+        Upper percentile bound.
+    n_valid : int
+        Number of bootstrap rows containing at least one finite value.
+    """
+    arr = np.asarray(arr, float)
+    if arr.ndim == 1:
+        arr = arr[None, :]
+
+    valid_rows = np.any(np.isfinite(arr), axis=1)
+    if not np.any(valid_rows):
+        out = np.full(arr.shape[1], np.nan, dtype=float)
+        return out, out.copy(), out.copy(), 0
+
+    arrv = arr[valid_rows]
+    return (
+        np.nanmean(arrv, axis=0),
+        np.nanpercentile(arrv, qlo, axis=0),
+        np.nanpercentile(arrv, qhi, axis=0),
+        int(arrv.shape[0]),
+    )
+
+
+def variofit(values, coordinates, distance_type, max_distance, bin_size, estimator_type, model_type, weight_fn,
+             weight_params, xmax_factor=2.0, fix_nugget=True, fix_sill=False, plot=False, plot_path=None,
+             balltree_leaf_size=40, max_neighbors=None,
+             bootstrap=None, bootstrap_method="pair", bootstrap_ci=(2.5, 97.5), random_state=None,
+             transform=None, lag_repr="center"):
+    """
+    Compute an experimental semivariogram and fit a user-selected variogram model,
+    optionally with bootstrap resampling for uncertainty quantification.
 
     Parameters
     ----------
@@ -788,106 +1497,205 @@ def variofit(values, coordinates, distance_type, max_distance, bin_size, estimat
         Sample values z_i at each coordinate.
     coordinates : array_like, shape (n, d)
         Sample locations.
-        If distance_type == 'geographic', coordinates[:,0]=lat (deg), coordinates[:,1]=lon (deg).
-        If distance_type == 'cartesian' : (x, y)
-        If distance_type == 'euclidean', coordinates are in linear units (e.g., km or m or dimensionless).
-    distance_type : {'geographic', 'euclidean'}
+        If distance_type == 'geographic', coordinates[:, 0] = latitude (deg),
+        coordinates[:, 1] = longitude (deg).
+        If distance_type == 'cartesian', coordinates are (x, y).
+        If distance_type == 'euclidean', coordinates are in linear units
+        (e.g., km, m, or dimensionless).
+    distance_type : {'geographic', 'cartesian', 'euclidean', 'angular'}
         Distance metric for lag computation.
-        'geographic' uses haversine over a sphere (Earth radius 6371.227 km) → lags in km.
-        'euclidean' uses standard euclidean norm → lags in the same units as `coordinates`.
-        'cartesian' uses the x, y values to compute the euclidean distance between pairs
+        'geographic' uses haversine distance over a sphere
+        (Earth radius 6371.227 km), returning lags in km.
+        'cartesian' uses Euclidean distance on (x, y).
+        'euclidean' uses the Euclidean norm in the coordinate space provided.
+        'angular' expects site angles in degrees as input and computes angular
+        separation lags in degrees.
     max_distance : float
         Maximum lag to include (same units as the chosen distance_type).
     bin_size : float
-        Width of each lag bin (same units as `max_distance`). Bin centers are
-        computed as `bin_size/2 + i*bin_size`.
+        Width of each lag bin (same units as `max_distance`).
+
+    lag_repr : {'center', 'edge', 'upper'}, default 'center'
+        Representative lag attached to each equal-width bin:
+        - 'center': midpoint of [k*bin_size, (k+1)*bin_size)
+        - 'edge'/'upper': upper edge of [k*bin_size, (k+1)*bin_size)
+
+        This affects the x-values used for plotting, weighting, and fitting, but
+        does not change which pairs fall into each bin.
     estimator_type : {'Matheron', 'CressieHawkins', 'Dowd'}
-        Semivariogram estimator per bin, applied to increments |z_i - z_j|.
+        Semivariogram estimator applied within each lag bin using increments
+        |z_i - z_j|.
     model_type : {'exponential', 'cubic', 'powered_exponential', 'matern',
-                  'gaussian', 'spherical', 'damped_cosine_angle'}
+                  'gaussian', 'spherical', 'damped_cosine_angle',
+                  'angular_dissimilarity'}
         Variogram model to fit. See Notes for parameterizations.
-    weight_fn : {None, 'ols', 'inverse-linear weighting', 'exponential weighting', 'powered weighting', 'linear weighting'}
-        Bin weight scheme for fitting. None/'ols' gives equal weights per bin.
-        Other schemes multiply a distance-decay weight by the bin pair-count.
+    weight_fn : {None, 'ols', 'inverse-linear weighting',
+                 'exponential weighting', 'powered weighting',
+                 'linear weighting', inverse-linear squared weighting}
+        Bin weight scheme for fitting. None or 'ols' gives equal weights per bin.
+        Other schemes multiply a distance-decay weight by the bin pair count.
     weight_params : list or dict or None
-        Parameters for the chosen weight_fn. If list, expected [b, alpha].
-        If dict, expected keys {'b', 'alpha'}. `alpha` is ignored for
-        'inverse-linear weighting' and 'exponential weighting'. If None, defaults to b = 0.25*max(h), alpha=1.0.
+        Parameters for the chosen `weight_fn`.
+        If list, expected format is [b, alpha].
+        If dict, expected keys are {'b', 'alpha'}.
+        `alpha` is ignored for 'inverse-linear weighting' and
+        'exponential weighting'.
+        If None, defaults to b = 0.25 * max(h), alpha = 1.0.
+    xmax_factor : float, default 2.0
+        Scaling factor used when constructing upper bounds and initial guesses
+        for the model range parameter in `make_init_and_bounds`.
     fix_nugget : bool, default True
         If True, fixes the nugget (b) to 0.0 during fitting.
     fix_sill : bool, default False
-        If True, fixes the partial sill (c0) to 1.0 during fitting (useful for normalized data).
+        If True, fixes the total sill (c0 + b) to 1.0 during fitting.
+        If the nugget is also free, the partial sill is constrained as c0 = 1 - b.
     plot : bool, default False
-        If True, shows a two-panel plot: bin counts and semivariogram with fitted curve.
+        If True, shows a two-panel plot of lag counts and the experimental
+        semivariogram with the fitted model. When bootstrapping is enabled,
+        the plot additionally shows bootstrap sample curves, the bootstrap mean,
+        and the percentile confidence band.
+    plot_path : str or None, default None
+        Optional file path for saving the plot. If None, the plot is shown
+        interactively.
     balltree_leaf_size : int, default 40
-        Leaf size for BallTree (only used for geographic/cartesian/euclidean).
-    plot_path : str, default None
-    max_neighbors : int or None
-        If not None, cap the number of neighbors per point when using BallTree.
+        Leaf size for BallTree. Only used for
+        'geographic', 'cartesian', and 'euclidean' distance types.
+    max_neighbors : int or None, default None
+        If not None, caps the number of neighbors per point when using BallTree.
+    bootstrap : int or None, default None
+        Number of bootstrap replicates. If None, no bootstrapping is performed
+        and only the fitted experimental semivariogram is returned.
+    bootstrap_method : {'pair', 'point'}, default 'pair'
+        Bootstrap resampling scheme used when `bootstrap` is not None.
+
+        - 'pair' resamples the already-constructed pair list (distance and
+          increment pairs) with replacement.
+        - 'point' resamples observation points with replacement and rebuilds
+          the pair list from the resampled dataset.
+
+        The 'pair' method is typically more stable, whereas 'point' is usually
+        more conservative because it perturbs the underlying site configuration.
+    bootstrap_ci : tuple(float, float), default (2.5, 97.5)
+        Lower and upper percentile bounds used for the bootstrap confidence
+        interval, e.g. (5, 95) for a 5th–95th percentile interval.
+    random_state : int or None, default None
+        Seed for reproducible bootstrap resampling.
+    transform : {None, 'correlation'}, default None
+        Output transform applied after fitting.
+
+        - None:
+            Return the usual semivariogram outputs.
+        - 'correlation':
+            Keep fitting in semivariogram space, but return:
+              * experimental ordinates transformed to correlation space
+              * fitted parameters in normalized correlation-form
+              * fitted/bootstrapped curves evaluated in correlation space
+
+        For the auto-case, the transformed parameterization uses:
+            c0_corr = c0 / (c0 + b)
+            b_corr  = b  / (c0 + b)
+        with all range/shape parameters unchanged.
+
     Returns
     -------
     h_lag : ndarray, shape (k, 1)
-        Lag bin centers actually used (non-empty bins).
+        Representative lag values of the non-empty bins, according to `lag_repr`.
     n_obs : ndarray, shape (k, 1)
         Pair counts per bin.
     gamma : ndarray, shape (k, 1)
         Experimental semivariogram values per bin.
     params : dict
-        Fitted model parameters (keys depend on `model_type`).
+        Dictionary of fitted model parameters (keys depend on `model_type`).
+
+        If bootstrapping is enabled, bootstrap results are also stored under
+        `params["bootstrap"]`, including the bootstrap sample curves, bootstrap
+        mean, percentile confidence intervals, and sampled fitted parameters.
+        If bootstrapping is disabled, `params["bootstrap"]` is None.
     r2_wls : float
-        Weighted R^2 computed at bin centers using the same weights passed to the objective.
+        Weighted R² computed at the representative lag values using the same
+        weights passed to the fitting objective.
     r2_ols : float
-        Ordinary R^2 computed at bin centers using weights as ones passed to the objective.
+        Ordinary R² computed at the representative lag values using equal weights.
 
     Notes
     -----
     - Estimators:
-      * Matheron: 0.5 * mean( (z_i - z_j)^2 ).
-      * Cressie–Hawkins: robust, uses small-sample bias correction.
-      * Dowd: median-based, robust to outliers.
+      * Matheron:
+            gamma(h) = 0.5 * mean((z_i - z_j)^2)
+      * Cressie–Hawkins:
+            robust estimator with small-sample bias correction.
+      * Dowd:
+            median-based robust estimator.
 
-    - Model parameterizations (your exact implementations):
-      * exponential:     gamma(h)= b + c0 * (1 - exp(-h/a)) with internal a=r/3.
-      * gaussian:        gamma(h)= b + c0 * (1 - exp(-(h/a)^2)) with a=r/2.
-      * spherical:       compact support; r is the effective range.
-      * cubic:           compact support; r is the effective range.
-      * powered_exponential: gamma(h)= b + c0 * (1 - exp(-(h/a)^beta)), a = r / 3^(1/beta).
-      * matern:          gamma(h)= b + c0 * [1 - (2/Gamma(s)) ((h√s)/a)^s K_s(2(h√s)/a)], with a=r/2.
-      * damped_cosine_angle: gamma(θ)= b + c0 * [1 - cos(θ) * exp(-θ/c)],
+    - Model parameterizations (following the exact implementations used here):
+      * exponential:
+            gamma(h) = b + c0 * (1 - exp(-h / a)), with internal a = r / 3
+      * gaussian:
+            gamma(h) = b + c0 * (1 - exp(-(h / a)^2)), with a = r / 2
+      * spherical:
+            compact-support model, where r is the effective range
+      * cubic:
+            compact-support model, where r is the effective range
+      * powered_exponential:
+            gamma(h) = b + c0 * (1 - exp(-(h / a)^beta)),
+            with a = r / 3^(1 / beta)
+      * matern:
+            gamma(h) = b + c0 * [1 - (2 / Gamma(s)) * ((h * sqrt(s)) / a)^s
+            * K_s(2 * (h * sqrt(s)) / a)], with a = r / 2
+      * damped_cosine_angle:
+            gamma(theta) = b + c0 * [1 - cos(theta) * exp(-theta / c)]
       * angular_dissimilarity:
-                             where θ is in degrees and c is a damping angle in degrees.
+            angular semivariogram based on angular lag in degrees, with c
+            representing a damping angle in degrees
 
     - Angular vs distance lags:
-      * 'damped_cosine_angle' expects angular lags in **degrees**. If you pass
-        distance-based `h_lag`, the fit will be meaningless—use this model only
-        when your bins represent angles.
+      * 'damped_cosine_angle' and 'angular_dissimilarity' expect angular lags
+        in degrees. If distance-based lags are passed, the fitted model will
+        not be meaningful.
 
     - Weights:
-      * 'inverse-linear weighting': n_j * 1/(1 + h/b)
-      * 'exponential weighting':   n_j * exp(-h/b)
-      * 'powered weighting':     n_j * (1 + h/b)^(-alpha)
-      * 'linear weighting':   n_j * ones(size.h,)
-      * 'ols':              ones(size.h,)
-      Each of these is multiplied by the bin pair-count.
+      * 'inverse-linear weighting':
+            n_j * 1 / (1 + h / b)
+      * 'exponential weighting':
+            n_j * exp(-h / b)
+      * 'powered weighting':
+            n_j * (1 + h / b)^(-alpha)
+      * 'linear weighting':
+            n_j
+      * 'ols':
+            1
+        These are applied at the bin level, with distance-based weights
+        multiplied by the corresponding bin pair counts.
 
     - Optimization:
-      The fit minimizes sum_i w_i * (gamma_i - model(h_i; θ))^2 with bounds
-      and initial guesses chosen by `make_init_and_bounds`.
+      The fit minimizes
 
+          sum_i w_i * [gamma_i - model(h_i; theta)]^2
+
+      with bounds and initial guesses chosen by `make_init_and_bounds`.
+
+    - Bootstrap interpretation:
+      * 'pair' bootstrap quantifies uncertainty conditional on the observed
+        pair structure and is generally smoother and more stable.
+      * 'point' bootstrap quantifies uncertainty at the observation/site level
+        and is usually more variable because the pair structure is rebuilt each
+        replicate.
     """
-    # ensure arrays
+
+    _validate_transform(transform)
+
     values = np.asarray(values, float)
     coords = np.asarray(coordinates, float)
     n = len(values)
+
     if n < 2:
         raise ValueError("Need at least 2 points to compute a variogram.")
 
-    # number of bins (same as original)
-    nmax = int(round(max_distance / bin_size))
+    nmax = int(np.ceil(float(max_distance) / float(bin_size)))
     if nmax <= 0:
         raise ValueError("max_distance / bin_size must be > 0.")
 
-    # define semivariance estimator
+    # estimator
     if estimator_type == "Matheron":
         semivarioest_fn = matheron
     elif estimator_type == "CressieHawkins":
@@ -897,7 +1705,7 @@ def variofit(values, coordinates, distance_type, max_distance, bin_size, estimat
     else:
         raise ValueError("Invalid estimator: choose from 'Matheron', 'CressieHawkins', or 'Dowd'")
 
-    # define semivariance model
+    # model
     if model_type == "exponential":
         semivariomodel_fn = exponential
     elif model_type == "cubic":
@@ -920,177 +1728,27 @@ def variofit(values, coordinates, distance_type, max_distance, bin_size, estimat
             "'matern', 'spherical', 'gaussian', 'angular_dissimilarity' or 'damped_cosine_angle'"
         )
 
-    dt = str(distance_type).lower()
-    EARTH_RAD = 6371.227  # km
+    # -------------------------------------------------
+    # main pair list and experimental semivariogram
+    # -------------------------------------------------
+    d, dz = _build_pair_arrays(
+        values, coords, distance_type, max_distance, bin_size,
+        balltree_leaf_size=balltree_leaf_size,
+        max_neighbors=max_neighbors,
+    )
+
+    h_full, n_full, gamma_full, h_lag, n_obs, gamma = _binned_semivariogram_from_pairs(
+        d, dz, bin_size, max_distance, estimator_type, semivarioest_fn, lag_repr=lag_repr
+    )
+
+    if h_lag.size == 0:
+        raise ValueError(
+            "No valid lag bins with a defined experimental semivariance were found. "
+            "Check the data, bin_size, max_distance, and the available pair structure."
+        )
 
     # -------------------------------------------------
-    # Build pair list (d, dz) – BallTree if applicable
-    # -------------------------------------------------
-    d = None   # distances
-    dz = None  # |z_i - z_j|
-
-    use_bt = dt in ("geographic", "geographical", "cartesian", "euclidean")
-
-    if use_bt:
-        if dt in ("geographic", "geographical"):
-            # BallTree with haversine metric; coords in radians
-            lat_deg = coords[:, 0]
-            lon_deg = coords[:, 1]
-            lat_rad = np.deg2rad(lat_deg)
-            lon_rad = np.deg2rad(lon_deg)
-            pts = np.column_stack([lat_rad, lon_rad])
-
-            tree = BallTree(pts, metric="haversine", leaf_size=balltree_leaf_size)
-
-            # radius slightly larger than max_distance for last bin
-            radius = (float(max_distance) + 0.5 * float(bin_size)) / EARTH_RAD  # radians
-
-            ind_list, dist_list = tree.query_radius(
-                pts, r=radius, return_distance=True, sort_results=True
-            )
-
-            d_list = []
-            dz_list = []
-            for i in range(n):
-                inds = ind_list[i]
-                dists_rad = dist_list[i]
-                mask = inds > i  # j > i, no self-pairs
-                if not np.any(mask):
-                    continue
-
-                js = inds[mask]
-                d_ij = dists_rad[mask] * EARTH_RAD  # back to km
-
-                if max_neighbors is not None and max_neighbors > 0:
-                    js = js[:max_neighbors]
-                    d_ij = d_ij[:max_neighbors]
-
-                d_list.append(d_ij)
-                dz_list.append(np.abs(values[i] - values[js]))
-
-            if d_list:
-                d = np.concatenate(d_list)
-                dz = np.concatenate(dz_list)
-
-        elif dt in ("cartesian", "euclidean"):
-            pts = coords
-            tree = BallTree(pts, metric="euclidean", leaf_size=balltree_leaf_size)
-
-            radius = float(max_distance) + 0.5 * float(bin_size)
-
-            ind_list, dist_list = tree.query_radius(
-                pts, r=radius, return_distance=True, sort_results=True
-            )
-
-            d_list = []
-            dz_list = []
-            for i in range(n):
-                inds = ind_list[i]
-                dists = dist_list[i]
-                mask = inds > i
-                if not np.any(mask):
-                    continue
-
-                js = inds[mask]
-                d_ij = dists[mask]
-
-                if max_neighbors is not None and max_neighbors > 0:
-                    js = js[:max_neighbors]
-                    d_ij = d_ij[:max_neighbors]
-
-                d_list.append(d_ij)
-                dz_list.append(np.abs(values[i] - values[js]))
-
-            if d_list:
-                d = np.concatenate(d_list)
-                dz = np.concatenate(dz_list)
-
-    # Fallback: dense distance matrix (exact original logic, just vectorised)
-    if (d is None) or (dz is None) or (d.size == 0):
-        if dt in ("geographic", "geographical"):
-            lat = coords[:, 0]
-            lon = coords[:, 1]
-            dist_full = np.asarray(
-                haversine_oq(lon, lat, lon, lat, radians=False, earth_rad=EARTH_RAD),
-                dtype=float,
-            )
-        elif dt == "cartesian":
-            if coords.shape[1] != 2:
-                raise ValueError("cartesian requires coordinates shape (n,2): (x, y)")
-            dx = coords[:, None, 0] - coords[None, :, 0]
-            dy = coords[:, None, 1] - coords[None, :, 1]
-            dist_full = np.hypot(dx, dy)
-        elif dt == "euclidean":
-            diff = coords[:, None, :] - coords[None, :, :]
-            dist_full = np.linalg.norm(diff, axis=-1)
-        elif dt == "angular":
-            theta = np.asarray(coords, float).ravel()
-            cos_diff = np.cos(theta[:, None] - theta[None, :])
-            ang_rad = np.arccos(np.clip(cos_diff, -1.0, 1.0))
-            dist_full = np.degrees(ang_rad)
-        else:
-            raise ValueError(
-                "Invalid distance_type: choose 'geographic', 'geographical', "
-                "'cartesian', 'angular', or 'euclidean'"
-            )
-
-        iu, ju = np.triu_indices(n, k=1)
-        d = dist_full[iu, ju]
-        dz = np.abs(values[iu] - values[ju])
-
-    # -------------------------------------------------
-    # Binning: match ORIGINAL logic based on np.rint(...)
-    # -------------------------------------------------
-    # r_ij = nearest-integer bin index in units of bin_size
-    r_idx = np.rint(d / bin_size).astype(int)
-    # keep only those with 1 <= r_idx <= nmax
-    mask = (r_idx >= 1) & (r_idx <= nmax)
-    if not np.any(mask):
-        raise ValueError("No pair distances fell into bins 1..nmax; check max_distance/bin_size.")
-
-    r_idx = r_idx[mask]
-    dz = dz[mask]
-
-    # Convert to 0-based bin indices
-    bin_idx = r_idx - 1   # 0..nmax-1
-
-    # Precompute bin centers
-    h_lag = (bin_size / 2.0) + np.arange(nmax, dtype=float) * float(bin_size)
-    h_lag = h_lag.reshape(-1, 1)
-
-    # Counts per bin
-    counts = np.bincount(bin_idx, minlength=nmax).astype(float)
-    n_obs = counts.reshape(-1, 1)
-
-    # Experimental semivariances
-    gamma = np.full(nmax, np.nan, dtype=float)
-
-    if estimator_type == "Matheron":
-        # exact equivalent of looping and calling matheron on each bin
-        w = 0.5 * dz**2
-        sum_w = np.bincount(bin_idx, weights=w, minlength=nmax)
-        with np.errstate(invalid="ignore", divide="ignore"):
-            gamma = sum_w / counts
-        gamma[counts == 0] = np.nan
-    else:
-        # Cressie–Hawkins / Dowd etc. – call the estimator on each bin separately
-        for k in range(nmax):
-            mask_k = (bin_idx == k)
-            if not np.any(mask_k):
-                continue
-            x = dz[mask_k]
-            gamma[k] = semivarioest_fn(x)
-
-    gamma = gamma.reshape(-1, 1)
-
-    # drop empty bins
-    keep_bins = ~np.isnan(gamma).any(axis=1)
-    h_lag = h_lag[keep_bins]
-    n_obs = n_obs[keep_bins]
-    gamma = gamma[keep_bins]
-
-    # -------------------------------------------------
-    # Fit variogram model (unchanged from your original)
+    # main fit
     # -------------------------------------------------
     h = h_lag.ravel()
     g = gamma.ravel()
@@ -1099,35 +1757,250 @@ def variofit(values, coordinates, distance_type, max_distance, bin_size, estimat
     if weight_fn is None or str(weight_fn).lower() == "ols":
         weights = np.ones_like(h, dtype=float)
     else:
-        if isinstance(weight_params, dict):
+        if weight_params is None:
+            weight_params_fit = [0.25 * float(h.max()) if h.size else 1.0, 1.0]
+        elif isinstance(weight_params, dict):
             b = weight_params.get("b", 0.25 * float(h.max()) if h.size else 1.0)
             alpha = weight_params.get("alpha", 1.0)
-            weight_params = [b, alpha]
+            weight_params_fit = [b, alpha]
+        else:
+            weight_params_fit = weight_params
+
         weights = compute_distance_weights(
-            h, m, weight_type=weight_fn, weight_params=weight_params
+            h, m, weight_type=weight_fn, weight_params=weight_params_fit
         )
 
-    x0, bounds = make_init_and_bounds(model_type, h, g, xmax_factor, fix_nugget, fix_sill)
+    if fix_sill and not fix_nugget:
+        # Enforce total sill = 1, so c0 = 1 - b
+        x0_full, bounds_full = make_init_and_bounds(
+            model_type, h, g, xmax_factor, fix_nugget=False, fix_sill=False
+        )
+        x0, bounds = _compress_init_bounds_fixed_total_sill(model_type, x0_full, bounds_full)
 
-    res = minimize(
-        fun=lambda th: objective_func(th, h, g, weights, semivariomodel_fn),
-        x0=x0,
-        bounds=bounds,
-    )
-    theta_hat = res.x
+        res = minimize(
+            fun=lambda th: _objective_func_fixed_total_sill(
+                th, h, g, weights, model_type, semivariomodel_fn
+            ),
+            x0=x0,
+            bounds=bounds,
+        )
+        if not res.success:
+            raise RuntimeError(f"Variogram-model optimization failed: {res.message}")
+        theta_hat = np.asarray(_expand_theta_fixed_total_sill(model_type, res.x), float)
 
-    g_fit_bins = semivariomodel_fn(h, *theta_hat)
-    r2_wls = r2_score_weighted(g, g_fit_bins, w=weights)
-    r2_ols = r2_score_weighted(g, g_fit_bins, w=None)
+    else:
+        x0, bounds = make_init_and_bounds(
+            model_type, h, g, xmax_factor, fix_nugget, fix_sill
+        )
 
-    params = pack_params(model_type, theta_hat)
+        res = minimize(
+            fun=lambda th: objective_func(th, h, g, weights, semivariomodel_fn),
+            x0=x0,
+            bounds=bounds,
+        )
+        if not res.success:
+            raise RuntimeError(f"Variogram-model optimization failed: {res.message}")
+        theta_hat = np.asarray(res.x, float)
 
-    # smooth curve for plotting
-    xlag_fit = np.linspace(0.0, float(max_distance), 1000)
-    gamma_pred = semivariomodel_fn(xlag_fit, *theta_hat)
+    # raw semivariogram-space fit diagnostics
+    g_fit_bins_raw = semivariomodel_fn(h, *theta_hat)
+    r2_wls = r2_score_weighted(g, g_fit_bins_raw, w=weights)
+    r2_ols = r2_score_weighted(g, g_fit_bins_raw, w=None)
+
+    params_raw = pack_params(model_type, theta_hat)
+    xlag_fit = np.linspace(0.0, float(np.max(h_lag[:, 0]) + bin_size / 2.0), 1000)
+    gamma_pred_raw = semivariomodel_fn(xlag_fit, *theta_hat)
+
+    if transform is None:
+        gamma = np.asarray(gamma, float)
+        params = params_raw
+        g_fit_bins = g_fit_bins_raw
+        gamma_pred = gamma_pred_raw
+
+    elif transform == "correlation":
+        sill = _get_total_sill_from_params(params_raw)
+        params = _pack_corr_params_from_vario(model_type, params_raw)
+
+        # experimental ordinates: transform from fitted semivariogram sill
+        gamma = _gamma_to_correlation(np.asarray(gamma[:, 0], float), sill).reshape(-1, 1)
+
+        # fitted curve / fitted bin ordinates: evaluate in correlation-form model space
+        g_fit_bins = _evaluate_model_from_params(model_type, h, params, transform="correlation")
+        gamma_pred = _evaluate_model_from_params(model_type, xlag_fit, params, transform="correlation")
+
+    param_keys = list(params.keys())
 
     # -------------------------------------------------
-    # Plot (identical behaviour to your original)
+    # bootstrap
+    # -------------------------------------------------
+    boot = None
+    if bootstrap is not None:
+        n_boot = int(bootstrap)
+        if n_boot < 1:
+            raise ValueError("bootstrap must be None or a positive integer.")
+
+        method = str(bootstrap_method).lower()
+        if method not in {"pair", "point"}:
+            raise ValueError("bootstrap_method must be 'pair' or 'point'.")
+
+        qlo, qhi = map(float, bootstrap_ci)
+        if not (0.0 <= qlo < qhi <= 100.0):
+            raise ValueError("bootstrap_ci must satisfy 0 <= low < high <= 100.")
+
+        rng = np.random.default_rng(random_state)
+
+        gamma_boot = np.full((n_boot, h_full.shape[0]), np.nan, dtype=float)
+        model_boot = np.full((n_boot, xlag_fit.size), np.nan, dtype=float)
+
+        param_boot = {k: np.full(n_boot, np.nan, dtype=float) for k in param_keys}
+        r2_wls_boot = np.full(n_boot, np.nan, dtype=float)
+        r2_ols_boot = np.full(n_boot, np.nan, dtype=float)
+
+        for b_ix in range(n_boot):
+            try:
+                # --------------------------
+                # resample
+                # --------------------------
+                if method == "pair":
+                    draw = rng.integers(0, d.size, size=d.size)
+                    d_b = d[draw]
+                    dz_b = dz[draw]
+
+                elif method == "point":
+                    point_draw = rng.integers(0, n, size=n)
+                    values_b = values[point_draw]
+                    coords_b = coords[point_draw]
+
+                    d_b, dz_b = _build_pair_arrays(
+                        values_b, coords_b, distance_type, max_distance, bin_size,
+                        balltree_leaf_size=balltree_leaf_size,
+                        max_neighbors=max_neighbors,
+                    )
+
+                # --------------------------
+                # experimental variogram
+                # --------------------------
+                h_full_b, n_full_b, gamma_full_b, h_lag_b, n_obs_b, gamma_b = _binned_semivariogram_from_pairs(
+                    d_b, dz_b, bin_size, max_distance, estimator_type, semivarioest_fn, lag_repr=lag_repr
+                )
+
+                gamma_boot[b_ix, :] = gamma_full_b.ravel()
+
+                # --------------------------
+                # fit model
+                # --------------------------
+                h_b = h_lag_b.ravel()
+                g_b = gamma_b.ravel()
+                m_b = n_obs_b.ravel()
+
+                if weight_fn is None or str(weight_fn).lower() == "ols":
+                    weights_b = np.ones_like(h_b, dtype=float)
+                else:
+                    if weight_params is None:
+                        weight_params_b = [0.25 * float(h_b.max()) if h_b.size else 1.0, 1.0]
+                    elif isinstance(weight_params, dict):
+                        wb = weight_params.get("b", 0.25 * float(h_b.max()) if h_b.size else 1.0)
+                        wa = weight_params.get("alpha", 1.0)
+                        weight_params_b = [wb, wa]
+                    else:
+                        weight_params_b = weight_params
+
+                    weights_b = compute_distance_weights(
+                        h_b, m_b, weight_type=weight_fn, weight_params=weight_params_b
+                    )
+
+                if fix_sill and not fix_nugget:
+                    x0_full_b, bounds_full_b = make_init_and_bounds(
+                        model_type, h_b, g_b, xmax_factor, fix_nugget=False, fix_sill=False
+                    )
+                    x0_b, bounds_b = _compress_init_bounds_fixed_total_sill(
+                        model_type, x0_full_b, bounds_full_b
+                    )
+
+                    res_b = minimize(
+                        fun=lambda th: _objective_func_fixed_total_sill(
+                            th, h_b, g_b, weights_b, model_type, semivariomodel_fn
+                        ),
+                        x0=x0_b,
+                        bounds=bounds_b,
+                    )
+                    if not res_b.success:
+                        continue
+                    theta_b = np.asarray(_expand_theta_fixed_total_sill(model_type, res_b.x), float)
+
+                else:
+                    x0_b, bounds_b = make_init_and_bounds(
+                        model_type, h_b, g_b, xmax_factor, fix_nugget, fix_sill
+                    )
+
+                    res_b = minimize(
+                        fun=lambda th: objective_func(th, h_b, g_b, weights_b, semivariomodel_fn),
+                        x0=x0_b,
+                        bounds=bounds_b,
+                    )
+                    if not res_b.success:
+                        continue
+                    theta_b = np.asarray(res_b.x, float)
+
+                # raw fitted values for fit diagnostics
+                g_fit_b_raw = semivariomodel_fn(h_b, *theta_b)
+                r2_wls_boot[b_ix] = r2_score_weighted(g_b, g_fit_b_raw, w=weights_b)
+                r2_ols_boot[b_ix] = r2_score_weighted(g_b, g_fit_b_raw, w=None)
+
+                p_b_raw = pack_params(model_type, theta_b)
+
+                if transform is None:
+                    gamma_boot[b_ix, :] = gamma_full_b.ravel()
+                    model_boot[b_ix, :] = semivariomodel_fn(xlag_fit, *theta_b)
+                    p_b_store = p_b_raw
+
+                elif transform == "correlation":
+                    sill_b = _get_total_sill_from_params(p_b_raw)
+                    p_b_store = _pack_corr_params_from_vario(model_type, p_b_raw)
+
+                    gamma_boot[b_ix, :] = _gamma_to_correlation(gamma_full_b.ravel(), sill_b)
+                    model_boot[b_ix, :] = _evaluate_model_from_params(
+                        model_type, xlag_fit, p_b_store, transform="correlation"
+                    )
+
+                for k in param_keys:
+                    param_boot[k][b_ix] = p_b_store[k]
+
+            except Exception:
+                # keep NaNs for failed replicate
+                continue
+
+        gamma_mean, gamma_q05, gamma_q95, n_gamma_success = _bootstrap_summary(gamma_boot, qlo, qhi)
+        model_mean, model_q05, model_q95, n_model_success = _bootstrap_summary(model_boot, qlo, qhi)
+
+        boot = {
+            "n_bootstrap": n_boot,
+            "method": method,
+            "ci": (qlo, qhi),
+            "random_state": random_state,
+            "successful_gamma_bootstrap": n_gamma_success,
+            "successful_model_bootstrap": n_model_success,
+            "h_lag_full": h_full[:, 0].copy(),
+            "n_obs_full": n_full[:, 0].copy(),
+            "gamma_samples": gamma_boot,
+            "gamma_mean": gamma_mean,
+            "gamma_q05": gamma_q05,
+            "gamma_q95": gamma_q95,
+            "xlag_fit": xlag_fit.copy(),
+            "model_samples": model_boot,
+            "model_mean": model_mean,
+            "model_q05": model_q05,
+            "model_q95": model_q95,
+            "param_samples": param_boot,
+            "r2_wls_samples": r2_wls_boot,
+            "r2_ols_samples": r2_ols_boot,
+        }
+
+    if boot is not None:
+        params["bootstrap"] = boot
+
+    # -------------------------------------------------
+    # plot
     # -------------------------------------------------
     if plot:
         fig = plt.figure(figsize=(12, 7), dpi=200)
@@ -1144,38 +2017,100 @@ def variofit(values, coordinates, distance_type, max_distance, bin_size, estimat
         ax0.grid(which="minor")
 
         ax1 = plt.subplot(gs_plot[1], sharex=ax0)
-        ax1.plot(h_lag[:, 0], gamma[:, 0], "o", markeredgecolor="black")
-        ax1.plot(xlag_fit, gamma_pred, "-k")
+
+        # experimental points
+        ax1.plot(
+                h_lag[:, 0], gamma[:, 0],
+                "o", markeredgecolor="black", color="tab:blue",
+                label="Experimental", zorder=5
+        )
+
+        # bootstrap fitted curves + mean + CI
+        if boot is not None:
+            first = True
+            for yb in boot["model_samples"]:
+                if np.any(np.isfinite(yb)):
+                    ax1.plot(
+                        xlag_fit, yb,
+                        color="0.7", lw=0.8, alpha=0.2,
+                        label="Bootstrap samples" if first else None,
+                        zorder=1
+                    )
+                    first = False
+
+            if np.any(np.isfinite(boot["model_q05"])) and np.any(np.isfinite(boot["model_q95"])):
+                ax1.fill_between(
+                    xlag_fit,
+                    boot["model_q05"],
+                    boot["model_q95"],
+                    color="tab:orange",
+                    alpha=0.20,
+                    label=f"Bootstrap {boot['ci'][0]:g}-{boot['ci'][1]:g}% CI",
+                    zorder=2
+                )
+
+            if np.any(np.isfinite(boot["model_mean"])):
+                ax1.plot(
+                    xlag_fit, boot["model_mean"],
+                    color="tab:orange", lw=2.0,
+                    label="Bootstrap mean",
+                    zorder=3
+                )
+
+        # main fitted curve
+        if transform is None:
+            _plot_variogram_model_piecewise(
+                ax1,
+                xlag_fit,
+                gamma_pred,
+                params=params,
+                color="k",
+                lw=2.0,
+                ls="-",
+                label=r"Model, $R^2$ (WLS|OLS) = %.2f|%.2f" % (r2_wls, r2_ols),
+                zorder=4,
+                show_zero_point=True
+            )
+        else:
+            _plot_correlation_model_piecewise(
+                ax1,
+                xlag_fit,
+                gamma_pred,
+                params=params,
+                color="k",
+                lw=2.0,
+                ls="-",
+                label=r"Model, $R^2$ (WLS|OLS) = %.2f|%.2f" % (r2_wls, r2_ols),
+                zorder=4,
+                show_zero_point=True
+            )
 
         plt.setp(ax0.get_xticklabels(), visible=False)
 
-        yticks = ax1.yaxis.get_major_ticks()
-        if yticks:
-            yticks[-1].label1.set_visible(False)
+        if transform is None:
+            yticks = ax1.yaxis.get_major_ticks()
+            if yticks:
+                yticks[-1].label1.set_visible(False)
 
         ax0.set_ylabel("Number of Lags, N")
         ax0.set_ylim(0, max(n_obs[:, 0]))
 
-        ax1.legend(
-            ["Experimental", r"Model, $R^2$ (WLS|OLS) = %.2f|%.2f" % (r2_wls, r2_ols)],
-            loc="upper left",
-        )
+        ax1.legend(loc="upper left")
 
         ax1.set_xticks(h_lag[:, 0])
         num_ticks = len(h_lag[:, 0])
 
         if num_ticks <= 30:
-            step = 1  # show all labels
+            step = 1
         elif num_ticks <= 50:
-            step = 2  # show every 2nd label
+            step = 2
         elif num_ticks <= 70:
-            step = 3  # show every 3rd label
+            step = 3
         elif num_ticks <= 90:
             step = 4
         else:
-            step = max(1, num_ticks // 20)  # scale dynamically for very dense axes
+            step = max(1, num_ticks // 20)
 
-        # Apply visibility rule
         for i, label in enumerate(ax1.get_xticklabels()):
             if i % step != 0:
                 label.set_visible(False)
@@ -1183,10 +2118,36 @@ def variofit(values, coordinates, distance_type, max_distance, bin_size, estimat
         ax0.xaxis.grid(True, which="major", linestyle="--")
         ax1.xaxis.grid(True, which="major", linestyle="--")
 
-        ax1.set_xlim(0, max_distance)
-        ax1.set_ylim(0, max(max(gamma[:, 0]),max(gamma_pred))+0.075)
-        ax1.set_ylabel(r"Semivariance, $\gamma$ (%s)" % estimator_type)
+        y_candidates = [
+            gamma[:, 0],
+            gamma_pred,
+        ]
+        if boot is not None:
+            y_candidates.extend([
+                boot["model_mean"],
+                boot["model_q05"],
+                boot["model_q95"],
+            ])
+
+        y_all = np.concatenate([np.asarray(yc, float).ravel() for yc in y_candidates])
+        y_all = y_all[np.isfinite(y_all)]
+
+        ax1.set_xlim(0, float(np.max(h_lag[:, 0]) + bin_size / 2.0))
+
+        if transform is None:
+            ymax = np.nanmax(y_all) if y_all.size else 1.0
+            ax1.set_ylim(0, ymax + 0.075)
+            ax1.set_ylabel(r"Semivariance, $\gamma$ (%s)" % estimator_type)
+
+        else:
+            ax0.set_ylabel("Number of Lags, N", labelpad=22)
+            ax1.set_yticks([-1.00, -0.75, -0.50, -0.25, 0.00, 0.25, 0.50, 0.75, 1.00])
+            ax1.set_ylim(-1, 1)
+            ax1.set_ylabel(r"Correlation, $\rho$")
+            ax1.legend(loc="lower left")
+
         ax1.set_xlabel("lag distance")
+
         plt.subplots_adjust(hspace=0.0)
 
         if plot_path is not None:
@@ -1197,7 +2158,7 @@ def variofit(values, coordinates, distance_type, max_distance, bin_size, estimat
 
     return h_lag, n_obs, gamma, params, r2_wls, r2_ols
 
-# Main function: multi fitting
+# Grouped variogram fitting
 def variofitmulti(
     df,
     values_col,
@@ -1219,19 +2180,22 @@ def variofitmulti(
     show_progress=True,
     balltree_leaf_size=40,
     max_neighbors=None,
+    transform=None,
+    lag_repr="center",
 ):
     """
-    Fit experimental semivariograms for multiple groups and collect summaries.
+    Fit an experimental variogram separately for each group in a table.
 
-    For each unique value of `index_col`, this function:
-      1. Extracts the subset of rows for that group.
-      2. Calls `variofit` with the same semivariogram settings
-         (distance_type, max_distance, bin_size, estimator_type, model_type, etc.).
-      3. Stores the experimental semivariogram (h_lag, n_obs, gamma), the fitted
-         model parameters, and the weighted/unweighted R².
+    For each unique value of `index_col`, the function subsets the data, calls
+    `variofit`, and stores the experimental ordinates, fitted parameters, and fit
+    statistics. Because all groups share the same lag-bin definition, the outputs
+    can also be assembled into wide lag-by-group tables for later comparison or
+    summary plotting.
 
-    All groups share a **common bin grid** defined by `max_distance` and `bin_size`,
-    so the results can be combined into wide matrices with one column per group.
+    All groups share a **common equal-width bin grid** defined by `max_distance`
+    and `bin_size`. The representative lag axis attached to that grid is controlled
+    by `lag_repr`, so the results can be combined into wide matrices with one
+    column per group.
 
     Parameters
     ----------
@@ -1251,8 +2215,7 @@ def variofitmulti(
         - 'euclidean':
             list/tuple of columns forming an (n, d) coordinate array.
         - 'angular':
-            single column name or (colname,) with angles (radians or degrees,
-            consistent with how `variofit` interprets them).
+            single column name or (colname,) with angles in degrees.
 
     distance_type : {'geographic', 'geographical', 'cartesian', 'angular', 'euclidean'}
         Passed directly to `variofit` to select the distance metric.
@@ -1272,8 +2235,14 @@ def variofitmulti(
         Bin weighting scheme for the WLS fit in `variofit`.
     weight_params : list, dict, or None, optional
         Parameters for `weight_fn` (e.g. {'b': 50.0, 'alpha': 1.0}). See `variofit`.
-    xmax_factor, fix_nugget, fix_sill : see `variofit`
-        Control parameter bounds and fixed parameters during fitting.
+    xmax_factor : float, default 2.0
+        Scaling factor used when constructing upper bounds and initial guesses
+        for the model range parameter in `make_init_and_bounds`.
+    fix_nugget : bool, default True
+        If True, fixes the nugget (b) to 0.0 during fitting.
+    fix_sill : bool, default False
+        If True, fixes the total sill (c0 + b) to 1.0 during fitting.
+        If the nugget is also free, the partial sill is constrained as c0 = 1 - b.
     plot_single : bool, default False
         If True, `variofit` produces a two-panel plot for each group.
     plot_summary : bool, default False
@@ -1291,7 +2260,25 @@ def variofitmulti(
         Passed to `variofit`. If not None, limits the number of neighbours per
         point when using the BallTree. This can reduce computation for very
         large groups at the cost of an approximate variogram.
+    transform : {None, 'correlation'}, default None
+        Output transform applied after fitting.
 
+        - None:
+            Return the usual semivariogram outputs.
+        - 'correlation':
+            Keep fitting in semivariogram space, but return:
+              * experimental ordinates transformed to correlation space
+              * fitted parameters in normalized correlation-form
+              * fitted/bootstrapped curves evaluated in correlation space
+
+        For the auto-case, the transformed parameterization uses:
+            c0_corr = c0 / (c0 + b)
+            b_corr  = b  / (c0 + b)
+        with all range/shape parameters unchanged.
+    lag_repr : {'center', 'edge', 'upper'}, default 'center'
+        Representative lag attached to each equal-width bin. This controls the
+        x-axis used in the returned wide lag tables and in the per-group fitting,
+        but does not change bin membership.
     Returns
     -------
     summary : pandas.DataFrame
@@ -1304,21 +2291,23 @@ def variofitmulti(
           - plus one column per model parameter (e.g. 'r', 'c0', 'b').
     df_n_obs : pandas.DataFrame
         Wide matrix of pair counts per bin. First column 'h_lag' is the global
-        bin centers; one additional column per group with n_obs at each lag.
+        representative lag axis; one additional column per group with n_obs at each lag.
     df_gamma : pandas.DataFrame
-        Wide matrix of experimental semivariance. Same shape/columns as df_n_obs.
+        Wide matrix of experimental semivariance on the same lag axis as df_n_obs.
     results : dict
         Mapping {group_id: (h_lag, n_obs, gamma, params, r2_wls, r2_ols)} with
         the raw `variofit` output for each group.
     """
 
-    font_size = 16
+    _validate_transform(transform)
+
+    font_size = 12
     results = {}
     summary_rows = []
 
-    # full list of bin centers (global index for wide frames)
+    # full list of representative lag values (global index for wide frames)
     nmax = int(np.ceil(float(max_distance) / float(bin_size)))
-    full_h = (bin_size / 2.0) + np.arange(nmax, dtype=float) * float(bin_size)
+    full_h = _make_lag_axis(nmax, bin_size, lag_repr=lag_repr)
     full_h = np.round(full_h, 12)
 
     # initialize wide frames with the global bin axis
@@ -1372,7 +2361,7 @@ def variofitmulti(
                 theta = gdf[coord_cols[0]].to_numpy(dtype=float)
             else:
                 raise ValueError("angular requires a single column name in coord_cols")
-            coords = theta  # 1D is OK if your variofit handles it
+            coords = theta
             distance_type_pass = "angular"
 
         else:
@@ -1397,7 +2386,9 @@ def variofitmulti(
             fix_sill=fix_sill,
             plot=plot_single,
             balltree_leaf_size=balltree_leaf_size,
-            max_neighbors=max_neighbors
+            max_neighbors=max_neighbors,
+            transform=transform,
+            lag_repr=lag_repr,
         )
 
         h_lag, n_obs, gamma, params, r2_wls, r2_ols = res
@@ -1406,6 +2397,7 @@ def variofitmulti(
 
         if param_keys is None:
             param_keys = list(params.keys())
+            # param_keys = [k for k in params.keys() if k != "bootstrap"]
 
         # align this group's vectors to the global bin axis
         h = np.round(np.asarray(h_lag).ravel(), 12)
@@ -1453,20 +2445,27 @@ def variofitmulti(
             zorder=1
         )
 
-        xlag_fit = np.linspace(0.0, float(max_distance), 1000)
-        fn = VARIOGRAM_MODELS[model_type]
+        x_plot_max = float(np.max(full_h) + bin_size / 2.0)
+        xlag_fit = np.linspace(0.0, x_plot_max, 1000)
 
-        thetas = np.array(
-            [theta_from_params(params_g, model_type)
-             for _, (h_lag_g, n_obs_g, gamma_g, params_g, r2_wls_g, r2_ols_g) in results.items()],
-            dtype=float
-        )
+        # aggregated params
+        params_mean = {}
+        params_median = {}
 
-        theta_median = np.nanmedian(thetas, axis=0)
-        theta_mean   = np.nanmean(thetas, axis=0)
+        for k in param_keys:
+            vals_k = []
+            for _, (_, _, _, params_g, _, _) in results.items():
+                vals_k.append(float(params_g.get(k, np.nan)))
+            vals_k = np.asarray(vals_k, float)
+            params_mean[k] = float(np.nanmean(vals_k))
+            params_median[k] = float(np.nanmedian(vals_k))
 
-        y_median = fn(xlag_fit, *theta_median)
-        y_mean   = fn(xlag_fit, *theta_mean)
+        if transform == "correlation":
+            params_mean = _renormalize_correlation_params(params_mean)
+            params_median = _renormalize_correlation_params(params_median)
+
+        y_mean = _evaluate_model_from_params(model_type, xlag_fit, params_mean, transform=transform)
+        y_median = _evaluate_model_from_params(model_type, xlag_fit, params_median, transform=transform)
 
         Ys = []
         for gid, res_g in results.items():
@@ -1474,39 +2473,75 @@ def variofitmulti(
                 _, _, _, params_g, *_ = res_g
             except Exception:
                 continue
-            theta_g = theta_from_params(params_g, model_type)
-            Ys.append(fn(xlag_fit, *theta_g))
+            Ys.append(_evaluate_model_from_params(model_type, xlag_fit, params_g, transform=transform))
 
         if Ys:
             Y = np.asarray(Ys, dtype=float)
             y_lo = np.nanpercentile(Y, 5.0, axis=0)
             y_hi = np.nanpercentile(Y, 95.0, axis=0)
+
             lo = np.minimum(y_lo, y_hi)
             hi = np.maximum(y_lo, y_hi)
-            y_lo = np.maximum.accumulate(lo)
-            y_hi = np.maximum.accumulate(hi)
+
+            if transform is None:
+                # semivariograms should be nondecreasing
+                y_lo = np.maximum.accumulate(lo)
+                y_hi = np.maximum.accumulate(hi)
+            else:
+                # correlations should be nonincreasing
+                y_lo = np.minimum.accumulate(lo)
+                y_hi = np.minimum.accumulate(hi)
+
         else:
             y_lo = y_median.copy()
             y_hi = y_median.copy()
 
-        ax.plot(xlag_fit, y_mean,   color='k', lw=1.5, label='mean fit', zorder=1000)
-        ax.plot(xlag_fit, y_median, color='k', ls='--', lw=1.5, label='median fit', zorder=1000)
+        if transform is None:
+            _plot_variogram_model_piecewise(
+                ax, xlag_fit, y_mean, params_mean,
+                color='k', lw=1.5, ls='-',
+                label='mean fit', zorder=1000, show_zero_point=True
+            )
+            _plot_variogram_model_piecewise(
+                ax, xlag_fit, y_median, params_median,
+                color='k', lw=1.5, ls='--',
+                label='median fit', zorder=1000, show_zero_point=True
+            )
+        else:
+            _plot_correlation_model_piecewise(
+                ax, xlag_fit, y_mean, params_mean,
+                color='k', lw=1.5, ls='-',
+                label='mean fit', zorder=1000, show_zero_point=True
+            )
+            _plot_correlation_model_piecewise(
+                ax, xlag_fit, y_median, params_median,
+                color='k', lw=1.5, ls='--',
+                label='median fit', zorder=1000, show_zero_point=True
+            )
+
         ax.fill_between(xlag_fit, y_lo, y_hi, color='forestgreen', alpha=0.15, label='5–95% fit', zorder=0)
 
         for gid, (h_lag_g, n_obs_g, gamma_g, params_g, r2_wls_g, r2_ols_g) in results.items():
-            theta_g = theta_from_params(params_g, model_type)
-            y_fit_g = fn(xlag_fit, *theta_g)
+            y_fit_g = _evaluate_model_from_params(model_type, xlag_fit, params_g, transform=transform)
             ax.plot(xlag_fit, y_fit_g, '-k', lw=0.2, alpha=0.6)
 
         cb = fig.colorbar(sc, ax=ax, pad=0.02, fraction=0.04, aspect=40)
         cb.set_label('Observations per bin, n', fontsize = font_size)
         cb.ax.tick_params(labelsize=font_size)
         ax.legend(loc='best', frameon=False, fontsize = font_size)
-        ax.set_xlabel("lag distance", fontsize = font_size)
-        ax.set_ylabel(r'Semivariance, $\gamma$ (%s)' % estimator_type, fontsize = font_size)
+
+        ax.set_xlabel("lag distance", fontsize=font_size)
+
+        if transform is None:
+            ax.set_ylabel(r'Semivariance, $\gamma$ (%s)' % estimator_type, fontsize=font_size)
+            ax.set_ylim(0, float(np.nanmax(M['gamma'].to_numpy())))
+
+        else:
+            ax.set_ylabel(r'Correlation, $\rho$', fontsize=font_size)
+            ax.set_ylim(-1, 1)
+
         ax.tick_params(axis='both', labelsize=font_size)
-        ax.set_xlim(0, max_distance)
-        ax.set_ylim(0, float(M['gamma'].max()))
+        ax.set_xlim(0, x_plot_max)
         ax.grid(True, linestyle='--', alpha=0.3)
 
         if summary_figpath is not None:
@@ -1517,24 +2552,36 @@ def variofitmulti(
 
     return summary, df_n_obs, df_gamma, results
 
-# Main Function: crossvariofit and helpers
+# Cross-variogram fitting and helper functions
 def _compute_distance_and_ratio(coords, distance_type, bin_size):
     """
-    Internal helper to reproduce the distance + distance_ratio logic
-    used in `variofit`, without changing the existing implementation.
+    Compute the full pairwise distance matrix and its floor-based bin-index matrix.
+
+    This helper is only used in the parts of the cross-variogram workflow that
+    still rely on the dense distance-ratio formulation rather than the pair-list
+    workflow used elsewhere.
 
     Parameters
     ----------
     coords : array_like, shape (n, d)
-    distance_type : {'geographic','cartesian','euclidean','angular'}
+        Coordinates for all observations.
+    distance_type : {'geographic', 'geographical', 'cartesian', 'euclidean', 'angular'}
+        Distance metric used to construct the full distance matrix.
     bin_size : float
+        Lag-bin width used to convert distances to floor-based interval-bin indices.
 
     Returns
     -------
-    distance : (n, n) ndarray
-    distance_ratio : (n, n) ndarray of ints (rounded distance / bin_size)
+    distance : ndarray, shape (n, n)
+        Full pairwise distance matrix.
+    distance_ratio : ndarray, shape (n, n)
+        Floor(distance / bin_size) matrix used for interval-based lag assignment.
     """
     coords = np.asarray(coords, float)
+
+    distance_type = str(distance_type).lower().strip()
+    if distance_type == "geographical":
+        distance_type = "geographic"
 
     if distance_type == 'geographic':
         # coords[:,0]=lat, coords[:,1]=lon
@@ -1544,7 +2591,7 @@ def _compute_distance_and_ratio(coords, distance_type, bin_size):
             haversine_oq(lon, lat, lon, lat, radians=False, earth_rad=6371.227),
             dtype=float
         )
-        distance_ratio = np.rint(distance / bin_size)
+        distance_ratio = np.floor(distance / float(bin_size)).astype(int)
 
     elif distance_type == 'cartesian':
         # coords: (n,2) = (x,y)
@@ -1553,20 +2600,24 @@ def _compute_distance_and_ratio(coords, distance_type, bin_size):
         dx = coords[:, None, 0] - coords[None, :, 0]
         dy = coords[:, None, 1] - coords[None, :, 1]
         distance = np.hypot(dx, dy)
-        distance_ratio = np.rint(distance / bin_size)
+        distance_ratio = np.floor(distance / float(bin_size)).astype(int)
 
     elif distance_type == 'euclidean':
         diff = coords[:, None, :] - coords[None, :, :]
         distance = np.linalg.norm(diff, axis=-1)
-        distance_ratio = np.rint(distance / bin_size)
+        distance_ratio = np.floor(distance / float(bin_size)).astype(int)
 
     elif distance_type == 'angular':
-        # coords expected as angles in radians (or 1D array-like)
-        theta = np.asarray(coords, float).ravel()
+        # coords expected as angles in degrees
+        theta_deg = np.asarray(coords, float)
+        if theta_deg.ndim == 2:
+            if theta_deg.shape[1] != 1:
+                raise ValueError("angular distance requires a single angular coordinate per row.")
+        theta = np.radians(theta_deg.ravel())
         cos_diff = np.cos(theta[:, None] - theta[None, :])
         ang_rad = np.arccos(np.clip(cos_diff, -1.0, 1.0))
         distance = np.degrees(ang_rad)
-        distance_ratio = np.rint(distance / bin_size)
+        distance_ratio = np.floor(distance / float(bin_size)).astype(int)
 
     else:
         raise ValueError(
@@ -1577,12 +2628,32 @@ def _compute_distance_and_ratio(coords, distance_type, bin_size):
 
 def _adjust_bounds_for_cross(model_type, x0, bounds, g, allow_negative_sill=True):
     """
-    Allow negative c0 for cross-variograms by widening bounds around 0.
+    Relax the partial-sill bounds for cross-variogram fitting.
 
-    Uses the same parameter order assumed by pack_params/theta_from_params
-    and the VARIOGRAM_MODELS signatures.
+    Cross-variograms can legitimately have negative fitted partial sills, so this
+    helper widens the bounds on `c0` around zero while leaving all other bounds
+    unchanged. If the partial sill is already fixed, the bounds are returned
+    unchanged.
 
-    If the sill is fixed (bounds == (1,1)), no change is made.
+    Parameters
+    ----------
+    model_type : str
+        Name of the fitted model.
+    x0 : sequence of float
+        Initial parameter vector.
+    bounds : sequence of tuple
+        Bounds aligned with `x0`.
+    g : array_like
+        Experimental cross-semivariogram ordinates.
+    allow_negative_sill : bool, default True
+        If False, return the input values unchanged.
+
+    Returns
+    -------
+    x0 : tuple
+        Possibly adjusted initial parameter vector.
+    bounds : tuple
+        Possibly adjusted bounds.
     """
     if not allow_negative_sill:
         return x0, bounds
@@ -1615,6 +2686,168 @@ def _adjust_bounds_for_cross(model_type, x0, bounds, g, allow_negative_sill=True
 
     return tuple(x0), tuple(bounds)
 
+def _get_nugget_from_params(params):
+    """
+    Safely extract the nugget parameter from a parameter dictionary.
+
+    Parameters
+    ----------
+    params : dict or None
+        Parameter dictionary that may contain `b`.
+
+    Returns
+    -------
+    b0 : float
+        Nugget value if present and finite; otherwise 0.
+    """
+    params = {} if params is None else dict(params)
+    b0 = float(params.get("b", 0.0))
+    return b0 if np.isfinite(b0) else 0.0
+
+
+def _plot_variogram_model_piecewise(ax, x, y, params, color="k", lw=2.0, ls="-",
+                                    label=None, zorder=4, alpha_plot=1.0,
+                                    show_zero_point=True, jump_ls=":"):
+    """
+    Plot a variogram model with explicit nugget discontinuity:
+
+        gamma(0)  = 0
+        gamma(0+) = b
+
+    The positive-lag branch is plotted for x > 0 only, and a vertical jump
+    is drawn at x = 0 when b > 0.
+    """
+    x = np.asarray(x, float)
+    y = np.asarray(y, float)
+
+    b0 = _get_nugget_from_params(params)
+    has_nugget = np.isfinite(b0) and (b0 > 1e-12)
+
+    pos = x > 0
+
+    if has_nugget:
+        ax.plot(
+            x[pos], y[pos],
+            color=color, lw=lw, ls=ls, label=label,
+            zorder=zorder, alpha=alpha_plot
+        )
+
+        ax.plot(
+            [0.0, 0.0], [0.0, b0],
+            color=color, lw=max(1.0, lw * 0.8), ls=jump_ls,
+            zorder=zorder, alpha=alpha_plot
+        )
+
+        if show_zero_point:
+            ax.plot(
+                0.0, 0.0, "o",
+                ms=4, mfc="white", mec=color,
+                zorder=zorder + 0.1, alpha=alpha_plot
+            )
+    else:
+        ax.plot(
+            x, y,
+            color=color, lw=lw, ls=ls, label=label,
+            zorder=zorder, alpha=alpha_plot
+        )
+
+def _binned_cross_semivariogram_from_pairs(
+    d,
+    dz1,
+    dz2,
+    bin_size,
+    max_distance,
+    lag_repr="center",
+):
+    """
+    Bin pairwise distances and paired increments into experimental
+    cross-semivariogram ordinates.
+
+    Pair membership is defined by interval binning:
+        bin k contains distances in [k*bin_size, (k+1)*bin_size),
+    with the final bin capped at `max_distance`.
+
+    Parameters
+    ----------
+    d : array_like
+        Pairwise distances.
+    dz1, dz2 : array_like
+        Paired increments (z1_i - z1_j) and (z2_i - z2_j).
+    bin_size : float
+        Bin width.
+    max_distance : float
+        Maximum retained lag distance.
+    lag_repr : {"center", "edge", "upper"}, default "center"
+        Representative lag attached to each bin:
+        - "center": midpoint of [k*bin_size, (k+1)*bin_size)
+        - "edge"/"upper": upper edge of [k*bin_size, (k+1)*bin_size)
+
+    Returns
+    -------
+    h_full : ndarray, shape (nmax, 1)
+        Representative lag values for all bins.
+    counts_full : ndarray, shape (nmax, 1)
+        Pair counts for all bins.
+    gamma_full : ndarray, shape (nmax, 1)
+        Experimental cross-semivariance for all bins; NaN for empty bins.
+    h_valid : ndarray, shape (k, 1)
+        Representative lag values for non-empty bins.
+    counts_valid : ndarray, shape (k, 1)
+        Pair counts for non-empty bins.
+    gamma_valid : ndarray, shape (k, 1)
+        Experimental cross-semivariance for non-empty bins.
+    """
+    nmax = int(np.ceil(float(max_distance) / float(bin_size)))
+    if nmax <= 0:
+        raise ValueError("max_distance / bin_size must be > 0.")
+
+    d = np.asarray(d, dtype=float).ravel()
+    dz1 = np.asarray(dz1, dtype=float).ravel()
+    dz2 = np.asarray(dz2, dtype=float).ravel()
+
+    if not (d.shape == dz1.shape == dz2.shape):
+        raise ValueError("d, dz1, and dz2 must have the same shape.")
+
+    mask = (
+        np.isfinite(d)
+        & np.isfinite(dz1)
+        & np.isfinite(dz2)
+        & (d >= 0.0)
+        & (d <= float(max_distance))
+    )
+    if not np.any(mask):
+        raise ValueError(
+            "No pair distances fell into [0, max_distance]; check max_distance/bin_size."
+        )
+
+    d_use = d[mask]
+    dz1_use = dz1[mask]
+    dz2_use = dz2[mask]
+
+    bin_idx = np.floor(d_use / float(bin_size)).astype(int)
+    bin_idx = np.minimum(bin_idx, nmax - 1)
+
+    h_full = _make_lag_axis(nmax, bin_size, lag_repr=lag_repr)
+    counts = np.bincount(bin_idx, minlength=nmax).astype(float)
+
+    cp = 0.5 * dz1_use * dz2_use
+    sumcp = np.bincount(bin_idx, weights=cp, minlength=nmax)
+
+    gamma_full = np.full(nmax, np.nan, dtype=float)
+    nonempty = counts > 0
+    gamma_full[nonempty] = sumcp[nonempty] / counts[nonempty]
+
+    keep = np.isfinite(gamma_full)
+
+    return (
+        h_full.reshape(-1, 1),
+        counts.reshape(-1, 1),
+        gamma_full.reshape(-1, 1),
+        h_full[keep].reshape(-1, 1),
+        counts[keep].reshape(-1, 1),
+        gamma_full[keep].reshape(-1, 1),
+    )
+
 def crossvariofit(
     values1,
     values2,
@@ -1633,12 +2866,24 @@ def crossvariofit(
     plot=False,
     balltree_leaf_size=40,
     max_neighbors=None,
+    transform=None,
+    lag_repr="center",
 ):
     """
-    Compute an experimental cross-semivariogram and fit a variogram model.
+    Compute an experimental cross-semivariogram and fit the chosen model.
 
-    Mirrors `variofit` but uses the cross estimator:
-        γ12(h) = 0.5 * mean( (z1_i - z1_j) * (z2_i - z2_j) )
+    This follows the same workflow as `variofit`, but replaces the auto-semivariogram
+    estimator with the classical cross-semivariogram estimator
+
+        γ12(h) = 0.5 * mean[(z1_i - z1_j) (z2_i - z2_j)].
+
+    When `transform="correlation"`, the fitted cross-semivariogram is normalised in
+    the same way as the diagonal case, i.e.
+
+        ρ12(h) = 1 - γ12(h) / C12(0).
+
+    Unlike `variofit`, this function does not currently implement bootstrap
+    resampling.
 
     Parameters
     ----------
@@ -1659,12 +2904,35 @@ def crossvariofit(
         Leaf size for BallTree (used for 'geographic', 'cartesian', 'euclidean').
     max_neighbors : int or None, default None
         If not None, limits the number of neighbours per point when using BallTree.
+    transform : {None, 'correlation'}, default None
+        Optional output transform applied after fitting.
 
+        - None:
+            Return the fitted cross-semivariogram.
+        - 'correlation':
+            Return the normalized cross-correlation form
+                rho12(h) = 1 - gamma12(h) / C12(0),
+            using the fitted zero-lag cross-covariance C12(0) = c0 + b.
+    lag_repr : {'center', 'edge', 'upper'}, default 'center'
+        Representative lag attached to each equal-width bin:
+        - 'center': midpoint of [k*bin_size, (k+1)*bin_size)
+        - 'edge'/'upper': upper edge of [k*bin_size, (k+1)*bin_size)
+
+        This affects the x-values used for plotting, weighting, and fitting, but
+        does not change which pairs fall into each bin.
     Returns
     -------
     h_lag, n_obs, gamma12, params, r2_wls, r2_ols
-        Same tuple structure as `variofit`.
+        Same tuple structure as `variofit`, with `h_lag` giving the representative
+        lag values of the non-empty bins according to `lag_repr`.
     """
+
+    _validate_transform(transform)
+
+    distance_type = str(distance_type).lower().strip()
+    if distance_type == "geographical":
+        distance_type = "geographic"
+
     values1 = np.asarray(values1, float)
     values2 = np.asarray(values2, float)
     coords  = np.asarray(coordinates, float)
@@ -1681,52 +2949,44 @@ def crossvariofit(
         raise ValueError("Invalid Model: must be one of %s" % list(VARIOGRAM_MODELS.keys()))
     semivariomodel_fn = VARIOGRAM_MODELS[model_type]
 
+    if fix_sill and allow_negative_sill:
+        raise ValueError(
+            "fix_sill=True is incompatible with allow_negative_sill=True for cross-variograms."
+        )
+
     n = len(values1)
     if n < 2:
         raise ValueError("Need at least 2 points to compute a cross-variogram.")
 
     # number of bins
-    nmax = int(round(float(max_distance) / float(bin_size)))
+    nmax = int(np.ceil(float(max_distance) / float(bin_size)))
     if nmax <= 0:
         raise ValueError("max_distance / bin_size must be > 0.")
 
     dt = str(distance_type).lower().strip()
+    if dt == "geographical":
+        dt = "geographic"
 
     # ------------------------------------------------------------------
     # Case 1: ANGULAR -> keep existing dense logic via _compute_distance_and_ratio
     # ------------------------------------------------------------------
     if dt == "angular":
-        h_lag = np.zeros((nmax, 1))
-        gamma = np.zeros((nmax, 1))
-        n_obs = np.zeros((nmax, 1))
+        distance_full, _ = _compute_distance_and_ratio(coords, "angular", bin_size)
 
-        _, distance_ratio = _compute_distance_and_ratio(coords, "angular", bin_size)
+        iu, ju = np.triu_indices(n, k=1)
+        d = distance_full[iu, ju]
+        dz1 = values1[iu] - values1[ju]
+        dz2 = values2[iu] - values2[ju]
 
-        for i in range(1, nmax + 1):
-            site1, site2 = np.where(distance_ratio == i)
-            if len(site1) > 0:
-                h_lag[i - 1, 0] = bin_size / 2 + (i - 1) * bin_size
-                n_obs[i - 1, 0] = len(site1)
-
-                dz1 = values1[site1] - values1[site2]
-                dz2 = values2[site1] - values2[site2]
-                gamma[i - 1, 0] = cross_matheron(dz1, dz2)
-            else:
-                h_lag[i - 1, 0] = np.nan
-                n_obs[i - 1, 0] = np.nan
-                gamma[i - 1, 0] = np.nan
-
-        # drop empty bins
-        keep = ~np.isnan(gamma).any(axis=1)
-        h_lag = h_lag[keep]
-        n_obs = n_obs[keep]
-        gamma = gamma[keep]
+        _, _, _, h_lag, n_obs, gamma = _binned_cross_semivariogram_from_pairs(
+            d, dz1, dz2, bin_size, max_distance, lag_repr=lag_repr
+        )
 
     # ------------------------------------------------------------------
     # Case 2: geographic / cartesian / euclidean -> BallTree radius search
     # ------------------------------------------------------------------
     else:
-        # Build neighbour list with BallTree (same spirit as variofit)
+        # Build neighbour list with BallTree
         EARTH_RAD = 6371.227  # km
         d_list   = []
         dz1_list = []
@@ -1806,47 +3066,22 @@ def crossvariofit(
         dz2 = np.concatenate(dz2_list)
 
         # Binning
-        r_idx = np.rint(d / float(bin_size)).astype(int)
-        mask  = (r_idx >= 1) & (r_idx <= nmax)
-        if not np.any(mask):
-            raise ValueError("No pair distances fell into bins 1..nmax; check max_distance/bin_size.")
+        _, _, _, h_lag, n_obs, gamma = _binned_cross_semivariogram_from_pairs(
+            d, dz1, dz2, bin_size, max_distance, lag_repr=lag_repr
+        )
 
-        r_idx = r_idx[mask]
-        dz1   = dz1[mask]
-        dz2   = dz2[mask]
-
-        bin_idx = r_idx - 1  # 0..nmax-1
-
-        # Bin centres
-        h_centers = (bin_size / 2.0) + np.arange(nmax, dtype=float) * float(bin_size)
-        counts    = np.bincount(bin_idx, minlength=nmax).astype(float)
-
-        # Cross-semi: γ12(h) = 0.5 * mean(dz1 * dz2) per bin
-        cp    = 0.5 * dz1 * dz2
-        sumcp = np.bincount(bin_idx, weights=cp, minlength=nmax)
-
-        gamma_vec = np.full(nmax, np.nan, dtype=float)
-        nonzero   = counts > 0
-        gamma_vec[nonzero] = sumcp[nonzero] / counts[nonzero]
-
-        # keep only non-empty bins, shape (k,1) to match variofit
-        h_lag = h_centers[nonzero].reshape(-1, 1)
-        n_obs = counts[nonzero].reshape(-1, 1)
-        gamma = gamma_vec[nonzero].reshape(-1, 1)
-
-    # -------------------------------------------------
-    # From here on: identical to old crossvariofit path
-    # -------------------------------------------------
     h = h_lag.ravel()
     g = gamma.ravel()
     m = n_obs.ravel()
 
-    # handle fully empty edge-case
+    # Guard against the case where no valid lag bins remain after filtering.
     if h.size == 0:
-        params = pack_params(model_type, theta_from_params({"r": np.nan, "c0": np.nan, "b": np.nan}, model_type))
-        return h_lag, n_obs, gamma, params, np.nan, np.nan
+        raise ValueError(
+            "No valid lag bins with a defined experimental cross-semivariance were found. "
+            "Check the data, bin_size, max_distance, and the available pair structure."
+        )
 
-    # weights (same spirit as variofit, but safer defaults)
+    # Build lag-bin weights
     if weight_fn is None or str(weight_fn).lower() == "ols":
         weights = np.ones_like(h, dtype=float)
     else:
@@ -1862,33 +3097,80 @@ def crossvariofit(
             h, m, weight_type=weight_fn, weight_params=weight_params
         )
 
-    # init & bounds from existing helper then relax c0 if needed
-    x0, bounds = make_init_and_bounds(
-        model_type, h, g, xmax_factor=xmax_factor, fix_nugget=fix_nugget, fix_sill=fix_sill
-    )
-    x0, bounds = _adjust_bounds_for_cross(
-        model_type, x0, bounds, g, allow_negative_sill=allow_negative_sill
-    )
+    # Build initial values and bounds; relax c0 bounds for cross terms if needed.
+    if fix_sill and not fix_nugget:
+        # Enforce total sill = 1, so c0 = 1 - b
+        x0_full, bounds_full = make_init_and_bounds(
+            model_type, h, g, xmax_factor=xmax_factor, fix_nugget=False, fix_sill=False
+        )
+        x0, bounds = _compress_init_bounds_fixed_total_sill(model_type, x0_full, bounds_full)
 
-    # optimize
-    res = minimize(
-        fun=lambda th: objective_func(th, h, g, weights, semivariomodel_fn),
-        x0=x0,
-        bounds=bounds
-    )
-    theta_hat = res.x
+        res = minimize(
+            fun=lambda th: _objective_func_fixed_total_sill(
+                th, h, g, weights, model_type, semivariomodel_fn
+            ),
+            x0=x0,
+            bounds=bounds,
+        )
+        if not res.success:
+            raise RuntimeError(f"Cross-variogram-model optimization failed: {res.message}")
+        theta_hat = np.asarray(_expand_theta_fixed_total_sill(model_type, res.x), float)
 
-    # R^2
-    g_fit_bins = semivariomodel_fn(h, *theta_hat)
-    r2_wls = r2_score_weighted(g, g_fit_bins, w=weights)
-    r2_ols = r2_score_weighted(g, g_fit_bins, w=None)
+    else:
 
-    # store params
-    params = pack_params(model_type, theta_hat)
+        x0, bounds = make_init_and_bounds(
+            model_type, h, g, xmax_factor=xmax_factor, fix_nugget=fix_nugget, fix_sill=fix_sill
+        )
+        x0, bounds = _adjust_bounds_for_cross(
+            model_type, x0, bounds, g, allow_negative_sill=allow_negative_sill
+        )
 
-    # smooth curve for plotting
-    xlag_fit = np.linspace(0.0, float(max_distance), 1000)
-    gamma_pred = semivariomodel_fn(xlag_fit, *theta_hat)
+        res = minimize(
+            fun=lambda th: objective_func(th, h, g, weights, semivariomodel_fn),
+            x0=x0,
+            bounds=bounds
+        )
+        if not res.success:
+            raise RuntimeError(f"Cross-variogram-model optimization failed: {res.message}")
+        theta_hat = np.asarray(res.x, float)
+
+    # raw semivariogram-space fit diagnostics
+    g_fit_bins_raw = semivariomodel_fn(h, *theta_hat)
+    r2_wls = r2_score_weighted(g, g_fit_bins_raw, w=weights)
+    r2_ols = r2_score_weighted(g, g_fit_bins_raw, w=None)
+
+    params_raw = pack_params(model_type, theta_hat)
+    xlag_fit = np.linspace(0.0, float(max_distance + bin_size / 2.0), 1000)
+    gamma_pred_raw = semivariomodel_fn(xlag_fit, *theta_hat)
+
+    if transform is None:
+        gamma = np.asarray(gamma, float)
+        params = params_raw
+        g_fit_bins = g_fit_bins_raw
+        gamma_pred = gamma_pred_raw
+
+    elif transform == "correlation":
+        sill = float(params_raw.get("c0", np.nan)) + float(params_raw.get("b", 0.0))
+        if not np.isfinite(sill) or sill <= 0.0:
+            raise ValueError(
+                "transform='correlation' requires a positive fitted cross-sill "
+                "(c0 + b > 0). The fitted cross-semivariogram returned c0 + b <= 0, "
+                "so the normalized cross-correlation transform is not defined."
+            )
+
+        params = _pack_corr_params_from_vario(model_type, params_raw)
+
+        gamma = _gamma_to_correlation(
+            np.asarray(gamma[:, 0], float),
+            sill
+        ).reshape(-1, 1)
+
+        g_fit_bins = _evaluate_model_from_params(
+            model_type, h, params, transform="correlation"
+        )
+        gamma_pred = _evaluate_model_from_params(
+            model_type, xlag_fit, params, transform="correlation"
+        )
 
     if plot:
         fig = plt.figure(figsize=(12, 7), dpi=200)
@@ -1899,31 +3181,86 @@ def crossvariofit(
         ax0.grid(which='minor')
 
         ax1 = plt.subplot(gs_plot[1], sharex=ax0)
-        ax1.plot(h_lag[:, 0], gamma[:, 0], 'o', markeredgecolor='black')
-        ax1.plot(xlag_fit, gamma_pred, '-k')
+        ax1.plot(
+            h_lag[:, 0], gamma[:, 0],
+            'o', markeredgecolor='black',
+            label='Cross Experimental', zorder=5
+        )
+
+        if transform is None:
+            _plot_variogram_model_piecewise(
+                ax1,
+                xlag_fit,
+                gamma_pred,
+                params=params,
+                color='k',
+                lw=2.0,
+                ls='-',
+                label=r'Model, $R^2$ (WLS|OLS) = %.2f|%.2f' % (r2_wls, r2_ols),
+                zorder=4,
+                show_zero_point=True
+            )
+        else:
+            _plot_correlation_model_piecewise(
+                ax1,
+                xlag_fit,
+                gamma_pred,
+                params=params,
+                color='k',
+                lw=2.0,
+                ls='-',
+                label=r'Model, $R^2$ (WLS|OLS) = %.2f|%.2f' % (r2_wls, r2_ols),
+                zorder=4,
+                show_zero_point=True
+            )
 
         plt.setp(ax0.get_xticklabels(), visible=False)
 
-        yticks = ax1.yaxis.get_major_ticks()
-        if len(yticks) > 0:
-            yticks[-1].label1.set_visible(False)
+        if transform is None:
+            yticks = ax1.yaxis.get_major_ticks()
+            if len(yticks) > 0:
+                yticks[-1].label1.set_visible(False)
 
         ax0.set_ylabel('Number of Lags, N')
         ax0.set_ylim(0, np.nanmax(n_obs[:, 0]) if n_obs.size else 1)
 
-        ax1.legend(
-            ['Cross Experimental', r'Model, $R^2$ (WLS|OLS) = %.2f|%.2f' % (r2_wls, r2_ols)],
-            loc='upper left'
-        )
+        ax1.set_xlim(0, float(max_distance + bin_size / 2.0))
 
+        if transform is None:
+            _set_ylim_from_points_and_fit(ax1, gamma[:, 0], gamma_pred, allow_negative=allow_negative_sill)
+            ax1.set_ylabel(r'Cross-semivariance, $\gamma_{12}$')
+            ax1.legend(loc='upper left')
+
+        else:
+            ax0.set_ylabel("Number of Lags, N", labelpad=22)
+            ax1.set_yticks([-1.00, -0.75, -0.50, -0.25, 0.00, 0.25, 0.50, 0.75, 1.00])
+            ax1.set_ylim(-1.0, 1.0)
+            ax1.set_ylabel(r'Cross-correlation, $\rho_{12}$')
+            ax1.legend(loc='lower left')
+
+        ax1.set_xlabel('lag distance')
         ax1.set_xticks(h_lag[:, 0])
+
+        num_ticks = len(h_lag[:, 0])
+
+        if num_ticks <= 30:
+            step = 1
+        elif num_ticks <= 50:
+            step = 2
+        elif num_ticks <= 70:
+            step = 3
+        elif num_ticks <= 90:
+            step = 4
+        else:
+            step = max(1, num_ticks // 20)
+
+        for i, label in enumerate(ax1.get_xticklabels()):
+            if i % step != 0:
+                label.set_visible(False)
+
         ax0.xaxis.grid(True, which='major', linestyle='--')
         ax1.xaxis.grid(True, which='major', linestyle='--')
 
-        plt.xlim(0, max_distance)
-        _set_ylim_from_points_and_fit(ax1, gamma[:, 0], gamma_pred, allow_negative=allow_negative_sill)
-        plt.ylabel(r'Cross-semivariance, $\gamma_{12}$')
-        plt.xlabel('lag distance')
         plt.subplots_adjust(hspace=.0)
         plt.show(fig)
 
@@ -1948,16 +3285,113 @@ def multicrossvariofit(
     plot_matrix=False,
     balltree_leaf_size=40,
     max_neighbors=None,
+    transform=None,
+    lag_repr="center",
 ):
     """
-    Fit auto-variograms (diag) and cross-variograms (off-diag) for multiple variables.
+    Fit the full auto/cross variogram matrix for a set of variables.
 
-    This uses `variofit` for auto-variograms (diagonal) and `crossvariofit`
-    for cross-variograms (off-diagonal). For distance_type in
-    {'geographic','cartesian','euclidean'} both use a BallTree radius search
-    with arguments `balltree_leaf_size` and `max_neighbors` so that only
-    pairs within `max_distance` are considered.
+    Diagonal terms are fitted with `variofit`; off-diagonal terms are fitted with
+    `crossvariofit`. The function returns both a long-form summary table and a set
+    of square parameter/R² matrices indexed by variable name.
+
+    For geographic, cartesian, and euclidean coordinates, both the auto- and
+    cross-variogram paths use the same BallTree-based neighbour search so that only
+    pairs within `max_distance` are retained.
+
+    Parameters
+    ----------
+    df : pandas.DataFrame
+        Input table containing the variables and coordinates.
+    values_cols : sequence of str
+        Column names of the variables to include in the auto/cross variogram matrix.
+    coord_cols : sequence of str or str
+        Coordinate columns, interpreted according to `distance_type`.
+
+        - 'geographic':
+            (lat_col, lon_col) in degrees.
+        - 'cartesian':
+            (x_col, y_col) in linear units.
+        - 'euclidean':
+            list/tuple of columns forming an (n, d) coordinate array.
+        - 'angular':
+            a single column of angles in degrees.
+    distance_type : {'geographic', 'geographical', 'cartesian', 'euclidean', 'angular'}
+        Distance metric used to define lags.
+    max_distance : float
+        Maximum lag distance retained.
+    bin_size : float
+        Lag-bin width.
+    estimator_type : str
+        Experimental estimator. Must be 'Matheron' because cross-variograms are
+        currently only implemented for the classical Matheron estimator.
+    model_type : {'exponential', 'cubic', 'powered_exponential', 'matern',
+                  'gaussian', 'spherical', 'damped_cosine_angle',
+                  'angular_dissimilarity'}
+        Variogram model fitted to every diagonal and off-diagonal term.
+    weight_fn : str or None, default None
+        Bin-weighting rule passed through to `variofit` and `crossvariofit`.
+    weight_params : list, dict, or None, default None
+        Parameters controlling `weight_fn`.
+    xmax_factor : float, default 2.0
+        Multiplier used to cap the upper bound of the range-like parameter.
+    fix_nugget : bool, default True
+        If True, fix the nugget parameter at 0.
+    fix_sill : bool, default False
+        If True, apply the fixed-sill logic used by the underlying fitting functions.
+    allow_negative_sill : bool, default True
+        Passed only to `crossvariofit`. If True, cross-partial-sill values are
+        allowed to be negative in semivariogram space.
+    plot_single : bool, default False
+        If True, show the individual fit plot for each diagonal and off-diagonal fit.
+    plot_matrix : bool, default False
+        If True, show a lower-triangular matrix plot of the fitted auto/cross
+        variograms or correlations.
+    balltree_leaf_size : int, default 40
+        BallTree leaf size passed to the underlying fitting functions.
+    max_neighbors : int or None, default None
+        Optional cap on the number of neighbours retained per point when BallTree
+        is used.
+    transform : {None, 'correlation'}, default None
+        Output transform applied after fitting.
+
+        - None:
+            Return variograms in semivariogram space.
+        - 'correlation':
+            Return normalized auto- and cross-correlation forms using the same
+            normalization rule as the corresponding fitted sill.
+    lag_repr : {'center', 'edge', 'upper'}, default 'center'
+        Representative lag attached to each equal-width bin for both the auto-
+        and cross-variogram fits. This affects plotting, weighting, and fitting
+        x-values, but does not change bin membership.
+
+    Returns
+    -------
+    summary : pandas.DataFrame
+        Long-form summary with one row per fitted term. Includes variable names,
+        whether the term is auto or cross, the number of samples and lag bins,
+        fit statistics, and the fitted model parameters.
+    results : dict
+        Dictionary keyed by `(var_i, var_j)` containing the raw outputs of
+        `variofit` or `crossvariofit`.
+    param_mats : dict[str, pandas.DataFrame]
+        Dictionary of square parameter matrices, one for each fitted model
+        parameter, indexed and columned by `values_cols`.
+    r2_mats : dict[str, pandas.DataFrame]
+        Dictionary containing the weighted and ordinary R² matrices with keys
+        `r2_wls` and `r2_ols`.
+
+    Notes
+    -----
+    Only the lower triangle is computed explicitly for cross terms; the opposite
+    orientation is filled by symmetry in the returned dictionaries and matrices.
     """
+
+    _validate_transform(transform)
+
+    distance_type = str(distance_type).lower().strip()
+    if distance_type == "geographical":
+        distance_type = "geographic"
 
     # Ensure the estimator is always 'Matheron' for cross-variograms
     if estimator_type != "Matheron":
@@ -2024,6 +3458,8 @@ def multicrossvariofit(
             plot=plot_single,
             balltree_leaf_size=balltree_leaf_size,
             max_neighbors=max_neighbors,
+            transform=transform,
+            lag_repr=lag_repr,
         )
 
         h_lag, n_obs, gamma, params, r2_wls, r2_ols = res
@@ -2071,6 +3507,8 @@ def multicrossvariofit(
                 plot=plot_single,
                 balltree_leaf_size=balltree_leaf_size,
                 max_neighbors=max_neighbors,
+                transform=transform,
+                lag_repr=lag_repr,
             )
 
             h_lag, n_obs, gamma, params, r2_wls, r2_ols = res
@@ -2124,23 +3562,28 @@ def multicrossvariofit(
 
     # --- Matrix plot: lower triangle only
     if plot_matrix:
-        fn = VARIOGRAM_MODELS[model_type]
-        xfit = np.linspace(0.0, float(max_distance), 600)
+        nmax = int(np.ceil(float(max_distance) / float(bin_size)))
+        x_plot_max = float(np.max(_make_lag_axis(nmax, bin_size, lag_repr=lag_repr)) + bin_size / 2.0)
+        xfit = np.linspace(0.0, x_plot_max, 600)
 
-        # Collect y-axis limits from *lower triangle only* (i >= j)
-        y_all = []
-        for (vi, vj), res in results.items():
-            i_idx = values_cols.index(vi)
-            j_idx = values_cols.index(vj)
-            if j_idx > i_idx:   # skip upper triangle
-                continue
-            _, _, gamma_ij, _, _, _ = res
-            y_all.extend(gamma_ij.ravel())
+        if transform is None:
+            y_all = []
+            for (vi, vj), res in results.items():
+                i_idx = values_cols.index(vi)
+                j_idx = values_cols.index(vj)
+                if j_idx > i_idx:
+                    continue
+                _, _, gamma_ij, _, _, _ = res
+                y_all.extend(gamma_ij.ravel())
 
-        y_all = np.asarray(y_all, float)
-        y_min, y_max = np.nanmin(y_all), np.nanmax(y_all)
-        y_min = min(0.0, y_min)
-        pad = 0.05 * (y_max - y_min)
+            y_all = np.asarray(y_all, float)
+            y_min, y_max = np.nanmin(y_all), np.nanmax(y_all)
+            y_min = min(0.0, y_min)
+            pad = 0.05 * (y_max - y_min)
+
+        else:
+            y_min, y_max = -1.0, 1.0
+            pad = 0.0
 
         fig, axes = plt.subplots(
             p, p, figsize=(2.4 * p, 2.4 * p), dpi=200, sharex=False, sharey=True
@@ -2153,7 +3596,6 @@ def multicrossvariofit(
             for j, vj in enumerate(values_cols):
                 ax = axes[i, j]
 
-                # skip upper triangle
                 if j > i:
                     ax.set_axis_off()
                     continue
@@ -2167,24 +3609,74 @@ def multicrossvariofit(
                 h = h_lag.ravel()
                 g = gamma_ij.ravel()
 
-                theta = theta_from_params(params_ij, model_type)
-                gfit = fn(xfit, *theta)
+                if i == j:
+                    gfit = _evaluate_model_from_params(
+                        model_type, xfit, params_ij, transform=transform
+                    )
+                else:
+                    gfit = _evaluate_model_from_params(
+                        model_type, xfit, params_ij, transform=transform
+                    )
 
                 ax.plot(h, g, 'o', ms=2.5, markeredgecolor='black')
-                ax.plot(xfit, gfit, '-k', lw=0.8)
+
+                if transform is None:
+                    _plot_variogram_model_piecewise(
+                        ax,
+                        xfit,
+                        gfit,
+                        params=params_ij,
+                        color='k',
+                        lw=0.8,
+                        ls='-',
+                        zorder=2,
+                        show_zero_point=True
+                    )
+                else:
+                    if i == j:
+                        _plot_correlation_model_piecewise(
+                            ax,
+                            xfit,
+                            gfit,
+                            params=params_ij,
+                            color='k',
+                            lw=0.8,
+                            ls='-',
+                            zorder=2,
+                            show_zero_point=True
+                        )
+                    else:
+                        _plot_correlation_model_piecewise(
+                            ax,
+                            xfit,
+                            gfit,
+                            params=params_ij,
+                            color='k',
+                            lw=0.8,
+                            ls='-',
+                            zorder=2,
+                            show_zero_point=True
+                        )
 
                 ax.set_title(f"{vi} × {vj}" if i != j else vi, fontsize=8)
 
+                ax.set_xlim(0, x_plot_max)
                 ax.set_ylim(y_min - pad, y_max + pad)
-                ax.set_xlim(0, max_distance)
                 ax.grid(True, linestyle='--', alpha=0.2)
+
+                if transform == "correlation":
+                    ax.set_yticks([-1.00, -0.50, 0.00, 0.50, 1.00])
 
                 if i == p - 1:
                     ax.set_xlabel("lag", fontsize=8)
                 else:
                     ax.set_xlabel("")
+
                 if j == 0:
-                    ax.set_ylabel("γ", fontsize=8)
+                    if transform is None:
+                        ax.set_ylabel("γ", fontsize=8)
+                    else:
+                        ax.set_ylabel("ρ", fontsize=8)
                 else:
                     ax.set_ylabel("")
 
