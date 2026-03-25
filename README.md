@@ -54,8 +54,8 @@ The package is broken down into three main functions as follows:
 
 3. Estimation of cross-variograms and cross-correlograms
      ```bash
-       from VarioCorreKrigE.variofit import crossvariofit, multicrossvariofit
-       from VarioCorreKrigE.correfit import crosscorrefit, multicrosscorrefit
+     from VarioCorreKrigE.variofit import crossvariofit, multicrossvariofit
+     from VarioCorreKrigE.correfit import crosscorrefit, multicrosscorrefit
      ```
      ![crossfit](https://github.com/AaronJR474/VarioCorreKrigE/blob/main/Examples/Data/crossfit.png)
    
