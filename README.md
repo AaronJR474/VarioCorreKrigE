@@ -38,30 +38,47 @@ Refer to [Theory](https://github.com/AaronJR474/VarioCorreKrigE/blob/main/theory
 
 The package is broken down into three main functions as follows:
 
-1. `variofit.py`: Estimation of Semivariance and fitting of variogram models
+1. `variofit.py`: Estimation of Semivariance and fitting of variogram models (including bootstrapping: "pair" or "point" resampling)
      ```bash
        from VarioCorreKrigE.variofit import variofit, variofitmulti
        from VarioCorreKrigE.variofit import VARIOGRAM_MODELS
      ```
      ![variofit_bootstrap](https://github.com/AaronJR474/VarioCorreKrigE/blob/main/Examples/Data/variofit_bootstrap.png)
      
-2. `correfit.py`: Estimation of correlation coefficients and fitting of correlation models
+2. `correfit.py`: Estimation of correlation coefficients and fitting of correlation models (including bootstrapping: "pair" or "point" resampling)
      ```bash
        from VarioCorreKrigE.correfit import correfit, correfitmulti
        from VarioCorreKrigE.correfit import CORRELATION_MODELS
      ```
-3. `skrig.py`: Estimation of Simple Kriging (including Sequential Gaussian Simulation)
+     ![correfit_bootstrap](https://github.com/AaronJR474/VarioCorreKrigE/blob/main/Examples/Data/correfit_bootstrap.png)
+   
+4. `skrig.py`: Estimation of Simple Kriging with predefined or custom models (including Sequential Gaussian Simulation)
      ```bash
-       from VarioCorreKrigE.skrig import simple_kriging, sgs_simple_kriging
+       from VarioCorreKrigE.skrig import simple_kriging, simple_kriging_custom_corr, sgs_simple_kriging, sgs_simple_kriging_custom_corr
        from VarioCorreKrigE.correfit import CORRELATION_MODELS
        from VarioCorreKrigE.variofit import VARIOGRAM_MODELS
-       from VarioCorreKrigE.utils import theta_from_params, LatLongToPolar, sample_points_from_geotiff
      ```
+     ![sgs](https://github.com/AaronJR474/VarioCorreKrigE/blob/main/Examples/Data/sgs.png)
+
+5. `okrig.py`: Estimation of Ordinary Kriging with predefined or custom models
+     ```bash
+       from VarioCorreKrigE.skrig import ordinary_kriging, ordinary_kriging_custom_corr
+       from VarioCorreKrigE.correfit import CORRELATION_MODELS
+       from VarioCorreKrigE.variofit import VARIOGRAM_MODELS
+     ```
+     
+6. `bayes_krig.py`: Empirical Bayesian Kriging (EBK) using either bootstrapped variograms/correlograms or specified posterior (see: [VarioCorreKrige_bayesmcmc_example.ipynb](VarioCorreKrigE/Examples/VarioCorreKrige_bayesmcmc_example.ipynb))
+     ```bash
+       from VarioCorreKrigE.bayes_krig import bayes_krig
+     ```     
+     ![EBK](https://github.com/AaronJR474/VarioCorreKrigE/blob/main/Examples/Data/EBK.png)
+   
 In the folder [Examples](VarioCorreKrigE/Examples), there are detailed examples for each of the mentioned functions, including the ability to utilize custom correlation/variogram models not currently within the package. The examples also demonstrate the creation of custom covariance matrices and corresponding pairwise distances for a user-tailored Kriging analysis.
 
 _Future versions will be extended to include_:
-- _Ordinary and Universal Kriging_
-- _Bayesian Markov Chain Monte Carlo estimation of Variogram/Correlation model parameters_
+- _Directional/Anisotropic variograms/correlograms_
+- _Universal Kriging_
+- _Bayesian Updating for Combining Conditional Distributions_
 
 ## References
 
