@@ -21,9 +21,17 @@ Refer to [Theory](https://github.com/AaronJR474/VarioCorreKrigE/blob/main/theory
      ```bash
      pip install -r requirements.txt
      ```
+     AND Optional for Bayesian Markov Chain Monte Carlo (MCMC) analysis:
+     ```bash
+     pip install numpyro >= 0.18.0
+     ```
 ### Option B
   ```bash
   pip install git+https://github.com/AaronJR474/VarioCorreKrigE.git
+  ```
+  OR Optional for Bayesian Markov Chain Monte Carlo (MCMC) analysis:
+  ```bash
+  pip install "git+https://github.com/AaronJR474/VarioCorreKrigE.git#egg=VarioCorreKrigE[bayesmcmc]"
   ```
 
 ## Utilizing the package
@@ -32,12 +40,14 @@ The package is broken down into three main functions as follows:
 
 1. `variofit.py`: Estimation of Semivariance and fitting of variogram models
      ```bash
-       from VarioCorreKrigE.variofit import variofit
+       from VarioCorreKrigE.variofit import variofit, variofitmulti
        from VarioCorreKrigE.variofit import VARIOGRAM_MODELS
      ```
+     ![variofit_bootstrap](https://github.com/AaronJR474/VarioCorreKrigE/blob/main/Examples/Data/variofit_bootstrap.png)
+     
 2. `correfit.py`: Estimation of correlation coefficients and fitting of correlation models
      ```bash
-       from VarioCorreKrigE.correfit import correfit
+       from VarioCorreKrigE.correfit import correfit, correfitmulti
        from VarioCorreKrigE.correfit import CORRELATION_MODELS
      ```
 3. `skrig.py`: Estimation of Simple Kriging (including Sequential Gaussian Simulation)
