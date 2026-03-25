@@ -51,6 +51,13 @@ The package is broken down into three main functions as follows:
        from VarioCorreKrigE.correfit import CORRELATION_MODELS
      ```
      ![correfit_bootstrap](https://github.com/AaronJR474/VarioCorreKrigE/blob/main/Examples/Data/correfit_bootstrap.png)
+
+3. Estimation of cross-variograms and cross-correlograms
+     ```bash
+       from VarioCorreKrigE.variofit import crossvariofit, multicrossvariofit
+       from VarioCorreKrigE.correfit import crosscorrefit, multicrosscorrefit
+     ```
+     ![crossfit](https://github.com/AaronJR474/VarioCorreKrigE/blob/main/Examples/Data/crossfit.png)
    
 4. `skrig.py`: Estimation of Simple Kriging with predefined or custom models (including Sequential Gaussian Simulation)
      ```bash
@@ -77,6 +84,7 @@ In the folder [Examples](VarioCorreKrigE/Examples), there are detailed examples 
 
 _Future versions will be extended to include_:
 - _Directional/Anisotropic variograms/correlograms_
+- _Linear Model of Coregionalization fitting toolbox_
 - _Universal Kriging_
 - _Bayesian Updating for Combining Conditional Distributions_
 
