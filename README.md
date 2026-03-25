@@ -73,12 +73,18 @@ The package is broken down into three main functions as follows:
        from VarioCorreKrigE.correfit import CORRELATION_MODELS
        from VarioCorreKrigE.variofit import VARIOGRAM_MODELS
      ```
-     
-6. `bayes_krig.py`: Empirical Bayesian Kriging (EBK) using either bootstrapped variograms/correlograms or specified posterior (see: [VarioCorreKrige_bayesmcmc_example.ipynb](VarioCorreKrigE/Examples/VarioCorreKrige_bayesmcmc_example.ipynb))
+
+6. `cckrig.py`: Estimation of Cokriging (Simple and Ordinary Kriging variants) as well as Co-located kriging using Markov 1 and 2 Models
+     ```bash
+        from VarioCorreKrigE.cckrig import simple_cokriging, ordinary_cokriging, SCCK_MM1, SCCK_MM2, OCCK_MM1, OCCK_MM2, ICCK_MM1, ICCK_MM2, OICCK_MM1, OICCK_MM2
+     ```
+     ![EBK](https://github.com/AaronJR474/VarioCorreKrigE/blob/main/Examples/Data/EBK.png)
+   
+7. `bayes_krig.py`: Empirical Bayesian Kriging (EBK) using either bootstrapped variograms/correlograms or posterior from Bayesian MCMC (see: [VarioCorreKrige_bayesmcmc_example.ipynb](VarioCorreKrigE/Examples/VarioCorreKrige_bayesmcmc_example.ipynb))
      ```bash
        from VarioCorreKrigE.bayes_krig import bayes_krig
      ```     
-     ![EBK](https://github.com/AaronJR474/VarioCorreKrigE/blob/main/Examples/Data/EBK.png)
+     ![cckrig](https://github.com/AaronJR474/VarioCorreKrigE/blob/main/Examples/Data/cckrig.png)
    
 In the folder [Examples](VarioCorreKrigE/Examples), there are detailed examples for each of the mentioned functions, including the ability to utilize custom correlation/variogram models not currently within the package. The examples also demonstrate the creation of custom covariance matrices and corresponding pairwise distances for a user-tailored Kriging analysis.
 
