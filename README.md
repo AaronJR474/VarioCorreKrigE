@@ -40,15 +40,15 @@ The package is broken down into three main functions as follows:
 
 1. `variofit.py`: Estimation of Semivariance and fitting of variogram models (including bootstrapping: "pair" or "point" resampling)
      ```bash
-       from VarioCorreKrigE.variofit import variofit, variofitmulti
-       from VarioCorreKrigE.variofit import VARIOGRAM_MODELS
+     from VarioCorreKrigE.variofit import variofit, variofitmulti
+     from VarioCorreKrigE.variofit import VARIOGRAM_MODELS
      ```
      ![variofit_bootstrap](https://github.com/AaronJR474/VarioCorreKrigE/blob/main/Examples/Data/variofit_bootstrap.png)
      
 2. `correfit.py`: Estimation of correlation coefficients and fitting of correlation models (including bootstrapping: "pair" or "point" resampling)
      ```bash
-       from VarioCorreKrigE.correfit import correfit, correfitmulti
-       from VarioCorreKrigE.correfit import CORRELATION_MODELS
+     from VarioCorreKrigE.correfit import correfit, correfitmulti
+     from VarioCorreKrigE.correfit import CORRELATION_MODELS
      ```
      ![correfit_bootstrap](https://github.com/AaronJR474/VarioCorreKrigE/blob/main/Examples/Data/correfit_bootstrap.png)
 
@@ -61,28 +61,28 @@ The package is broken down into three main functions as follows:
    
 4. `skrig.py`: Estimation of Simple Kriging with predefined or custom models (including Sequential Gaussian Simulation)
      ```bash
-       from VarioCorreKrigE.skrig import simple_kriging, simple_kriging_custom_corr, sgs_simple_kriging, sgs_simple_kriging_custom_corr
-       from VarioCorreKrigE.correfit import CORRELATION_MODELS
-       from VarioCorreKrigE.variofit import VARIOGRAM_MODELS
+     from VarioCorreKrigE.skrig import simple_kriging, simple_kriging_custom_corr, sgs_simple_kriging, sgs_simple_kriging_custom_corr
+     from VarioCorreKrigE.correfit import CORRELATION_MODELS
+     from VarioCorreKrigE.variofit import VARIOGRAM_MODELS
      ```
      ![sgs](https://github.com/AaronJR474/VarioCorreKrigE/blob/main/Examples/Data/sgs.png)
 
 5. `okrig.py`: Estimation of Ordinary Kriging with predefined or custom models
      ```bash
-       from VarioCorreKrigE.skrig import ordinary_kriging, ordinary_kriging_custom_corr
-       from VarioCorreKrigE.correfit import CORRELATION_MODELS
-       from VarioCorreKrigE.variofit import VARIOGRAM_MODELS
+     from VarioCorreKrigE.skrig import ordinary_kriging, ordinary_kriging_custom_corr
+     from VarioCorreKrigE.correfit import CORRELATION_MODELS
+     from VarioCorreKrigE.variofit import VARIOGRAM_MODELS
      ```
 
 6. `cckrig.py`: Estimation of Cokriging (Simple and Ordinary Kriging variants) as well as Co-located kriging using Markov 1 and 2 Models
      ```bash
-        from VarioCorreKrigE.cckrig import simple_cokriging, ordinary_cokriging, SCCK_MM1, SCCK_MM2, OCCK_MM1, OCCK_MM2, ICCK_MM1, ICCK_MM2, OICCK_MM1, OICCK_MM2
+     from VarioCorreKrigE.cckrig import simple_cokriging, ordinary_cokriging, SCCK_MM1, SCCK_MM2, OCCK_MM1, OCCK_MM2, ICCK_MM1, ICCK_MM2, OICCK_MM1, OICCK_MM2
      ```
      ![cckrig](https://github.com/AaronJR474/VarioCorreKrigE/blob/main/Examples/Data/cckrig.png)
    
 7. `bayes_krig.py`: Empirical Bayesian Kriging (EBK) using either bootstrapped variograms/correlograms or posterior from Bayesian MCMC (see: [VarioCorreKrige_bayesmcmc_example.ipynb](VarioCorreKrigE/Examples/VarioCorreKrige_bayesmcmc_example.ipynb))
      ```bash
-       from VarioCorreKrigE.bayes_krig import bayes_krig
+     from VarioCorreKrigE.bayes_krig import bayes_krig
      ```     
      ![EBK](https://github.com/AaronJR474/VarioCorreKrigE/blob/main/Examples/Data/EBK.png)
    
