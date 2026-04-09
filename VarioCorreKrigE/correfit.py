@@ -1042,7 +1042,7 @@ def _prepare_crosscorrelation_geometry(coordinates, distance_type, bin_size, max
     if nmax <= 0:
         raise ValueError("max_distance / bin_size must be > 0.")
 
-    i_idx, j_idx = np.where(~np.eye(n, dtype=bool))
+    i_idx, j_idx = np.triu_indices(n, k=1)
     d = distance[i_idx, j_idx]
 
     keep = np.isfinite(d) & (d >= 0.0) & (d <= float(max_distance))
@@ -1155,7 +1155,7 @@ def _build_correlation_pair_arrays(values, coordinates, distance_type):
             "'angular', or 'euclidean'"
         )
 
-    i_idx, j_idx = np.where(~np.eye(n, dtype=bool))
+    i_idx, j_idx = np.triu_indices(n, k=1)
 
     d = distance[i_idx, j_idx]
     x = values[i_idx]
@@ -2117,7 +2117,7 @@ def _build_crosscorrelation_pair_arrays(values1, values2, coordinates, distance_
             "Invalid distance_type: choose 'geographic', 'cartesian', 'angular', or 'euclidean'"
         )
 
-    i_idx, j_idx = np.where(~np.eye(n, dtype=bool))
+    i_idx, j_idx = np.triu_indices(n, k=1)
 
     d = distance[i_idx, j_idx]
     x = values1[i_idx]
